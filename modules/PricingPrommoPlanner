@@ -1,0 +1,1498 @@
+Option Explicit
+
+' === PRICING & PROMO PLANNER MODULE ===
+' Enhanced for optimal pricing with ROI calculations
+' PERFORMANCE OPTIMIZED FOR 30K+ SKUs
+
+Private Const PLANNER_SHEET As String = "PricingPlanner"
+Private Const SKU_START_ROW As Long = 10
+Private Const DATA_START_COL As Long = 2
+
+' Column indices for planner grid
+Private Const COL_SKU As Long = 2
+Private Const COL_MLI As Long = 3
+Private Const COL_ABC As Long = 4
+Private Const COL_INPUT_RRP As Long = 5
+Private Const COL_INPUT_BDN As Long = 6
+Private Const COL_CURRENT_RRP As Long = 7
+Private Const COL_CURRENT_BDN As Long = 8
+Private Const COL_CURRENT_PRICE As Long = 9
+Private Const COL_LOWEST_POSSIBLE As Long = 10
+Private Const COL_SUGGESTED_PRICE As Long = 11
+Private Const COL_STRIKE_PRICE As Long = 12
+Private Const COL_COUPON_PRICE As Long = 13
+Private Const COL_NONSTRIKE_PRICE As Long = 14
+Private Const COL_STRIKE_ROI As Long = 15
+Private Const COL_COUPON_ROI As Long = 16
+Private Const COL_NONSTRIKE_ROI As Long = 17
+Private Const COL_COMPLIANCE_STATUS As Long = 18
+Private Const COL_DAYS_LEFT As Long = 19
+Private Const COL_NEXT_LEGAL As Long = 20
+Private Const COL_YTD_PROMO_PCT As Long = 21
+Private Const COL_BASELINE_QTY As Long = 22
+Private Const COL_ELASTICITY As Long = 23
+Private Const COL_MLI_PROMO_COUNT As Long = 24
+Private Const COL_SELECT As Long = 25
+
+' Planning section starts at column AE (31)
+Private Const COL_PLANNING_START As Long = 31
+Private Const PROMOS_PER_MONTH As Long = 4
+Private Const PLANNING_MONTHS As Long = 3
+
+' Data dictionaries
+Private skuDataDict As Object
+Private mliGroupDict As Object
+Private mliRevenueDict As Object
+Private complianceDict As Object
+Private abcDict As Object
+Private oosDict As Object
+Private abcQtyDict As Object
+Private promoROIDict As Object
+Private seasonalityDict As Object
+
+' === HELPER FUNCTIONS ===
+Private Sub SafeAddComment(cell As Range, commentText As String)
+    On Error Resume Next
+    cell.Comment.Delete
+    On Error GoTo 0
+    
+    cell.AddComment
+    cell.Comment.Text commentText
+    cell.Comment.Shape.TextFrame.AutoSize = True
+End Sub
+
+Sub SetupPricingPlannerSheet()
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    On Error GoTo 0
+    
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add
+        ws.Name = PLANNER_SHEET
+    End If
+    
+    Application.ScreenUpdating = False
+    ws.Cells.Clear
+    
+    With ws
+        ' Title
+        .Range("A1").Value = "PRICING PLANNER - REVENUE MAXIMIZATION & PROMO PLANNING"
+        .Range("A1").Font.Bold = True
+        .Range("A1").Font.Size = 16
+        .Range("A1").Interior.color = RGB(0, 102, 204)
+        .Range("A1").Font.color = RGB(255, 255, 255)
+        .Range("A1:AZ1").Merge
+        
+        ' Instructions
+        .Range("A3").Value = "Paste SKU/MLI/ABC/RRP/BDN in columns B-F. Prices optimize for maximum revenue & sell-through based on elasticity."
+        .Range("A3:P3").Merge
+        .Range("A3").WrapText = True
+        .Range("A3").RowHeight = 25
+        
+        ' Headers
+        .Range("A8").Value = "#"
+        .Range("B8").Value = "SKU"
+        .Range("C8").Value = "MLI"
+        .Range("D8").Value = "ABC"
+        .Range("E8").Value = "Input RRP"
+        .Range("F8").Value = "Input BDN"
+        .Range("G8").Value = "Current RRP"
+        .Range("H8").Value = "Current BDN"
+        .Range("I8").Value = "Current Price"
+        .Range("J8").Value = "Lowest Possible"
+        .Range("K8").Value = "Suggested Price"
+        .Range("L8").Value = "Strike Price"
+        .Range("M8").Value = "Coupon Price"
+        .Range("N8").Value = "Non-Strike Price"
+        .Range("O8").Value = "Strike ROI%"
+        .Range("P8").Value = "Coupon ROI%"
+        .Range("Q8").Value = "Non-Strike ROI%"
+        .Range("R8").Value = "Compliance"
+        .Range("S8").Value = "Days Left"
+        .Range("T8").Value = "Next Legal"
+        .Range("U8").Value = "YTD Promo%"
+        .Range("V8").Value = "Base Qty"
+        .Range("W8").Value = "Elasticity"
+        .Range("X8").Value = "MLI Promo%"
+        .Range("Y8").Value = "Select"
+        
+        ' Planning section headers - 3 months with 4 promos each
+        Dim planCol As Long: planCol = COL_PLANNING_START
+        .Cells(7, planCol).Value = "--- 3-MONTH PROMO PLANNING (4 promos per month) ---"
+        .Range(.Cells(7, planCol), .Cells(7, planCol + 47)).Merge
+        .Cells(7, planCol).Font.Bold = True
+        .Cells(7, planCol).Interior.color = RGB(255, 192, 0)
+        
+        Dim monthDate As Date: monthDate = Date
+        Dim m As Long, p As Long
+        
+        For m = 1 To PLANNING_MONTHS
+            Dim monthName As String: monthName = Format(monthDate, "mmm yy")
+            
+            For p = 1 To PROMOS_PER_MONTH
+                Dim baseCol As Long: baseCol = planCol + ((m - 1) * PROMOS_PER_MONTH * 4) + ((p - 1) * 4)
+                
+                .Cells(8, baseCol).Value = monthName & " P" & p & " Type"
+                .Cells(8, baseCol + 1).Value = "Price"
+                .Cells(8, baseCol + 2).Value = "Start"
+                .Cells(8, baseCol + 3).Value = "End"
+                
+                ' Color code by promo slot
+                Dim promoColor As Long
+                Select Case p
+                    Case 1: promoColor = RGB(255, 242, 204)
+                    Case 2: promoColor = RGB(221, 235, 247)
+                    Case 3: promoColor = RGB(240, 255, 240)
+                    Case 4: promoColor = RGB(255, 230, 230)
+                End Select
+                
+                .Range(.Cells(8, baseCol), .Cells(8, baseCol + 3)).Interior.color = promoColor
+                .Range(.Cells(8, baseCol), .Cells(8, baseCol + 3)).Font.Size = 9
+                .Range(.Cells(8, baseCol), .Cells(8, baseCol + 3)).Orientation = 45
+            Next p
+            
+            monthDate = DateAdd("m", 1, monthDate)
+        Next m
+        
+        ' Format all headers
+        With .Range("A8:Y8")
+            .Font.Bold = True
+            .Interior.color = RGB(0, 102, 204)
+            .Font.color = RGB(255, 255, 255)
+            .HorizontalAlignment = xlCenter
+            .Borders.LineStyle = xlContinuous
+        End With
+        
+        ' Format planning headers
+        With .Range(.Cells(8, planCol), .Cells(8, planCol + 47))
+            .Font.Bold = True
+            .HorizontalAlignment = xlCenter
+            .Borders.LineStyle = xlContinuous
+        End With
+        
+        ' Column widths
+        .Columns("A").ColumnWidth = 5
+        .Columns("B").ColumnWidth = 12
+        .Columns("C:D").ColumnWidth = 8
+        .Columns("E:Q").ColumnWidth = 10
+        .Columns("R").ColumnWidth = 10
+        .Columns("S").ColumnWidth = 8
+        .Columns("T").ColumnWidth = 10
+        .Columns("U").ColumnWidth = 10
+        .Columns("V:W").ColumnWidth = 8
+        .Columns("X").ColumnWidth = 10
+        .Columns("Y").ColumnWidth = 8
+        
+        ' Planning columns
+        Dim col As Long
+        For col = planCol To planCol + 47
+            .Columns(col).ColumnWidth = 9
+        Next col
+        
+        ' Add validation
+        With .Range("Y10:Y50000").Validation
+            .Delete
+            .Add Type:=xlValidateList, Formula1:="YES,NO"
+            .InCellDropdown = True
+        End With
+        
+        ' Add promo type validation for planning section
+        For m = 1 To PLANNING_MONTHS
+            For p = 1 To PROMOS_PER_MONTH
+                Dim typeCol As Long: typeCol = planCol + ((m - 1) * PROMOS_PER_MONTH * 4) + ((p - 1) * 4)
+                With .Range(.Cells(10, typeCol), .Cells(50000, typeCol)).Validation
+                    .Delete
+                    .Add Type:=xlValidateList, Formula1:="Strike-Through,Coupon,Non-Strike-Through,RRP,None"
+                    .InCellDropdown = True
+                End With
+            Next p
+        Next m
+        
+        ' Freeze panes
+        .Activate
+        .Range("C10").Select
+        ActiveWindow.FreezePanes = True
+        
+        ' Sample row
+        .Cells(10, 1).Value = 1
+        .Cells(10, 2).Value = "Paste SKUs here"
+        .Cells(10, 3).Value = "Paste MLI"
+        .Cells(10, 4).Value = "Paste ABC"
+        .Cells(10, 5).Value = "Paste RRP"
+        .Cells(10, 6).Value = "Paste BDN"
+        .Range(.Cells(10, 2), .Cells(10, 6)).Interior.color = RGB(255, 255, 0)
+        
+        ' Add buttons using shapes instead of cells
+        AddControlButtons ws
+        
+        ' Move to top
+        .Range("A1").Select
+    End With
+    
+    Application.ScreenUpdating = True
+End Sub
+
+Private Sub AddControlButtons(ws As Worksheet)
+    ' Delete existing buttons
+    Dim shp As Shape
+    For Each shp In ws.Shapes
+        On Error Resume Next
+        If shp.Type = 8 Then shp.Delete  ' 8 = msoFormControl
+        On Error GoTo 0
+    Next shp
+    
+    ' Add buttons
+    With ws.Buttons.Add(10, 80, 100, 25)
+        .Name = "btnLoadSKUs"
+        .Text = "LOAD SKUS"
+        .OnAction = "LoadSKUsToPlanner"
+    End With
+    
+    With ws.Buttons.Add(120, 80, 100, 25)
+        .Name = "btnCheckCompliance"
+        .Text = "CHECK COMPLIANCE"
+        .OnAction = "CheckCompliance"
+    End With
+    
+    With ws.Buttons.Add(230, 80, 120, 25)
+        .Name = "btnExportPlan"
+        .Text = "EXPORT PLAN"
+        .OnAction = "ExportPlan"
+    End With
+    
+    With ws.Buttons.Add(360, 80, 100, 25)
+        .Name = "btnBulkSelect"
+        .Text = "BULK SELECT"
+        .OnAction = "BulkSelectSKUs"
+    End With
+    
+    With ws.Buttons.Add(470, 80, 100, 25)
+        .Name = "btnClearSelection"
+        .Text = "CLEAR SELECTION"
+        .OnAction = "ClearSelection"
+    End With
+End Sub
+
+Private Sub FormatButton(rng As Range, color As Long)
+    With rng
+        .Merge
+        .Font.Bold = True
+        .Interior.color = color
+        .HorizontalAlignment = xlCenter
+        .Font.color = IIf(color = RGB(255, 192, 0), RGB(0, 0, 0), RGB(255, 255, 255))
+        .Borders.LineStyle = xlContinuous
+    End With
+End Sub
+
+Sub LoadSKUsToPlanner()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Loading SKUs..."
+    
+    ' Initialize dictionaries
+    Set skuDataDict = CreateObject("Scripting.Dictionary")
+    Set mliGroupDict = CreateObject("Scripting.Dictionary")
+    Set mliRevenueDict = CreateObject("Scripting.Dictionary")
+    Set complianceDict = CreateObject("Scripting.Dictionary")
+    Set abcDict = CreateObject("Scripting.Dictionary")
+    Set oosDict = CreateObject("Scripting.Dictionary")
+    Set abcQtyDict = CreateObject("Scripting.Dictionary")
+    Set promoROIDict = CreateObject("Scripting.Dictionary")
+    Set seasonalityDict = CreateObject("Scripting.Dictionary")
+    
+    ' Get Market and Channel
+    Dim market As String: market = "UK"
+    Dim channel As String: channel = "Online"
+    On Error Resume Next
+    market = Range("Market").Value
+    channel = Range("Channel").Value
+    On Error GoTo 0
+    
+    ' Get pasted data
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+    If lastRow < SKU_START_ROW Then
+        MsgBox "Please paste your data starting from row " & SKU_START_ROW, vbExclamation
+        GoTo Cleanup
+    End If
+    
+    ' Read pasted data
+    Dim pastedSKUs As Object: Set pastedSKUs = CreateObject("Scripting.Dictionary")
+    Dim row As Long
+    
+    For row = SKU_START_ROW To lastRow
+        Dim sku As String: sku = UCase(Trim(ws.Cells(row, 2).Value))
+        Dim mli As String: mli = Trim(ws.Cells(row, 3).Value)
+        Dim abc As String: abc = Trim(ws.Cells(row, 4).Value)
+        Dim inputRRP As Double: inputRRP = Val(ws.Cells(row, 5).Value)
+        Dim inputBDN As Double: inputBDN = Val(ws.Cells(row, 6).Value)
+        
+        If sku <> "" And sku <> "PASTE SKUS HERE" Then
+            pastedSKUs(sku) = Array(mli, abc, inputRRP, inputBDN, row)
+            
+            ' Track MLI groups
+            If mli <> "" Then
+                If Not mliGroupDict.Exists(mli) Then
+                    Set mliGroupDict(mli) = CreateObject("Scripting.Dictionary")
+                End If
+                mliGroupDict(mli)(sku) = True
+            End If
+        End If
+    Next row
+    
+    ' Clear calculated columns
+    ws.Range("G" & SKU_START_ROW & ":AB" & lastRow).ClearContents
+    ws.Range("G" & SKU_START_ROW & ":AB" & lastRow).Interior.color = xlNone
+    
+    ' Load data from tables
+    Application.StatusBar = "Loading pricing data..."
+    LoadAllSKUData pastedSKUs
+    
+    Application.StatusBar = "Loading PromoROI data..."
+    LoadPromoROIData pastedSKUs
+    
+    Application.StatusBar = "Loading seasonality data..."
+    LoadSeasonalityData pastedSKUs
+    
+    Application.StatusBar = "Loading compliance data..."
+    LoadComplianceData
+    
+    Application.StatusBar = "Calculating optimal prices..."
+    CalculateOptimalPricesWithROI ws, pastedSKUs, market, channel
+    
+    Application.StatusBar = "Calculating MLI promo counts..."
+    CalculateMLIPromoCounts ws, market, channel
+    
+    Application.StatusBar = "Generating summary..."
+    ShowDataQualitySummary ws, pastedSKUs.Count
+    
+Cleanup:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    
+    If pastedSKUs.Count > 0 Then
+        MsgBox "Loaded " & pastedSKUs.Count & " SKUs with optimal pricing and ROI calculations!", vbInformation
+    End If
+End Sub
+
+Private Sub LoadAllSKUData(pastedSKUs As Object)
+    On Error GoTo ErrorHandler
+    
+    ' Add validation check
+    If pastedSKUs Is Nothing Or pastedSKUs.Count = 0 Then
+        Exit Sub
+    End If
+    
+    Dim dataWs As Worksheet
+    Set dataWs = Nothing
+    
+    On Error Resume Next
+    Set dataWs = ThisWorkbook.Worksheets("Database")
+    If dataWs Is Nothing Then Set dataWs = ThisWorkbook.Worksheets("All SKU")
+    If dataWs Is Nothing Then Set dataWs = ThisWorkbook.Worksheets("All_SKU")
+    On Error GoTo ErrorHandler
+    
+    If dataWs Is Nothing Then
+        Dim ws As Worksheet
+        For Each ws In ThisWorkbook.Worksheets
+            If InStr(1, ws.Name, "All", vbTextCompare) > 0 And InStr(1, ws.Name, "SKU", vbTextCompare) > 0 Then
+                Set dataWs = ws
+                Exit For
+            End If
+        Next ws
+    End If
+    
+    If dataWs Is Nothing Then
+        MsgBox "Cannot find SKU data worksheet!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim lastRow As Long: lastRow = dataWs.Cells(dataWs.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then Exit Sub
+    
+    Dim headerRow As Long: headerRow = 1
+    Dim lastCol As Long: lastCol = dataWs.Cells(headerRow, dataWs.Columns.Count).End(xlToLeft).Column
+    
+    ' Find column indices
+    Dim skuCol As Long, rrpCol As Long, bdnCol As Long, priceCol As Long
+    Dim oosLMCol As Long, oos6MCol As Long, oos1YCol As Long
+    Dim abc3mCol As Long, abc6mCol As Long, abc1yCol As Long, abc2yCol As Long
+    Dim col As Long
+    
+    For col = 1 To lastCol
+        Dim colHeader As String: colHeader = UCase(Replace(Replace(Trim(CStr(dataWs.Cells(headerRow, col).Value)), " ", ""), "_", ""))
+        
+        Select Case True
+            Case colHeader = "SKU": skuCol = col
+            Case InStr(colHeader, "RRP") > 0 And rrpCol = 0: rrpCol = col
+            Case InStr(colHeader, "DEALERNET") > 0 Or InStr(colHeader, "BDN") > 0: bdnCol = col
+            Case InStr(colHeader, "SELLINGPRICE") > 0 Or InStr(colHeader, "CURRENTPRICE") > 0: priceCol = col
+            Case InStr(colHeader, "DAYSOOS") > 0 And InStr(colHeader, "LASTMONTH") > 0: oosLMCol = col
+            Case InStr(colHeader, "DAYSOOS") > 0 And InStr(colHeader, "LAST6M") > 0: oos6MCol = col
+            Case InStr(colHeader, "DAYSOOS") > 0 And InStr(colHeader, "LASTYEAR") > 0: oos1YCol = col
+            Case colHeader = "ABC3MQUANTITY" Or colHeader = "ABC.3MQUANTITY": abc3mCol = col
+            Case colHeader = "ABC6MQUANTITY" Or colHeader = "ABC.6MQUANTITY": abc6mCol = col
+            Case colHeader = "ABC1YQUANTITY" Or colHeader = "ABC.1YQUANTITY": abc1yCol = col
+            Case colHeader = "ABC2YQUANTITY" Or colHeader = "ABC.2YQUANTITY": abc2yCol = col
+        End Select
+    Next col
+    
+    If skuCol = 0 Then
+        MsgBox "Cannot find SKU column!", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Read all data
+    Dim dataRange As Variant
+    dataRange = dataWs.Range(dataWs.Cells(1, 1), dataWs.Cells(lastRow, lastCol)).Value
+    
+    ' Process each row
+    Dim i As Long
+    For i = 2 To UBound(dataRange, 1)
+        Dim sku As String: sku = UCase(Trim(CStr(dataRange(i, skuCol))))
+        
+        If pastedSKUs.Exists(sku) Then
+            Dim pastedData As Variant: pastedData = pastedSKUs(sku)
+            
+            Dim finalRRP As Double: finalRRP = pastedData(2)
+            Dim finalBDN As Double: finalBDN = pastedData(3)
+            Dim currentPrice As Double: currentPrice = 0
+            
+            If finalRRP = 0 And rrpCol > 0 Then finalRRP = Val(dataRange(i, rrpCol))
+            If finalBDN = 0 And bdnCol > 0 Then finalBDN = Val(dataRange(i, bdnCol))
+            If priceCol > 0 Then currentPrice = Val(dataRange(i, priceCol))
+            If currentPrice = 0 And finalRRP > 0 Then currentPrice = finalRRP
+            
+            skuDataDict(sku) = Array(pastedData(0), finalRRP, finalBDN, currentPrice)
+            abcDict(sku) = pastedData(1)
+            
+            If oosLMCol > 0 And oos6MCol > 0 And oos1YCol > 0 Then
+                oosDict(sku) = Array(Val(dataRange(i, oosLMCol)), Val(dataRange(i, oos6MCol)), Val(dataRange(i, oos1YCol)))
+            Else
+                oosDict(sku) = Array(0, 0, 0)
+            End If
+            
+            If abc3mCol > 0 And abc6mCol > 0 And abc1yCol > 0 And abc2yCol > 0 Then
+                abcQtyDict(sku) = Array(Val(dataRange(i, abc3mCol)), Val(dataRange(i, abc6mCol)), Val(dataRange(i, abc1yCol)), Val(dataRange(i, abc2yCol)))
+            Else
+                abcQtyDict(sku) = Array(0, 0, 0, 0)
+            End If
+        End If
+        
+        If i Mod 1000 = 0 Then
+            Application.StatusBar = "Loading SKU data... " & i & " of " & UBound(dataRange, 1)
+            DoEvents
+        End If
+    Next i
+    
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Error loading SKU data: " & Err.Description, vbExclamation
+End Sub
+
+Private Sub LoadPromoROIData(pastedSKUs As Object)
+    On Error Resume Next
+    Dim roiWs As Worksheet: Set roiWs = ThisWorkbook.Worksheets("ForecastData")
+    If roiWs Is Nothing Then Exit Sub
+    
+    Dim lastRow As Long: lastRow = roiWs.Cells(roiWs.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then Exit Sub
+    
+    Dim roiData As Variant
+    Dim tableFound As Boolean: tableFound = False
+    
+    Dim tbl As ListObject
+    For Each tbl In roiWs.ListObjects
+        If UCase(tbl.Name) = "FORECASTDATA" Or InStr(1, UCase(tbl.Name), "FORECAST", vbTextCompare) > 0 Then
+            roiData = tbl.Range.Value
+            tableFound = True
+            Exit For
+        End If
+    Next tbl
+    
+    If Not tableFound Then
+        Dim lastCol As Long: lastCol = roiWs.Cells(1, roiWs.Columns.Count).End(xlToLeft).Column
+        If lastCol > 35 Then lastCol = 35
+        roiData = roiWs.Range("A1:" & Chr(64 + lastCol) & lastRow).Value
+    End If
+    
+    ' Find columns
+    Dim skuCol As Long, baseQtyCol As Long, elasticityCol As Long
+    Dim strikeLiftCol As Long, couponLiftCol As Long, nonStrikeLiftCol As Long
+    Dim month1Col As Long
+    Dim i As Long
+    
+    For i = 1 To UBound(roiData, 2)
+        Dim colName As String: colName = UCase(Replace(Replace(Trim(CStr(roiData(1, i))), " ", ""), "-", ""))
+        Select Case colName
+            Case "SKU": skuCol = i
+            Case "BASELINEQTY": baseQtyCol = i
+            Case "PRICEELASTICITY": elasticityCol = i
+            Case "STRIKETHROUGHLIFT": strikeLiftCol = i
+            Case "COUPONLIFT": couponLiftCol = i
+            Case "NONSTRIKETHROUGHLIFT": nonStrikeLiftCol = i
+            Case "MONTH1": month1Col = i
+        End Select
+    Next i
+    
+    If skuCol = 0 Or baseQtyCol = 0 Or elasticityCol = 0 Then Exit Sub
+    
+    ' Load data
+    For i = 2 To UBound(roiData, 1)
+        Dim sku As String: sku = UCase(Trim(CStr(roiData(i, skuCol))))
+        If sku <> "" And pastedSKUs.Exists(sku) Then
+            ' Store seasonality data (Month1 through Month12)
+            If month1Col > 0 And month1Col + 11 <= UBound(roiData, 2) Then
+                Dim monthFactors(11) As Double
+                Dim j As Long
+                For j = 0 To 11
+                    monthFactors(j) = Val(roiData(i, month1Col + j))
+                    If monthFactors(j) <= 0 Then monthFactors(j) = 1
+                Next j
+                seasonalityDict(sku) = monthFactors
+            End If
+            
+            promoROIDict(sku) = Array( _
+                Val(roiData(i, baseQtyCol)), _
+                Val(roiData(i, elasticityCol)), _
+                Val(roiData(i, strikeLiftCol)), _
+                Val(roiData(i, couponLiftCol)), _
+                Val(roiData(i, nonStrikeLiftCol)) _
+            )
+        End If
+        
+        If i Mod 1000 = 0 Then
+            Application.StatusBar = "Loading PromoROI data... " & i & " of " & UBound(roiData, 1)
+            DoEvents
+        End If
+    Next i
+    On Error GoTo 0
+End Sub
+
+Private Sub LoadSeasonalityData(pastedSKUs As Object)
+    ' Already loaded in LoadPromoROIData from ForecastData
+    ' This is kept for compatibility or if you have a separate SeasonalityData sheet
+End Sub
+
+Private Sub CalculateOptimalPricesWithROI(ws As Worksheet, pastedSKUs As Object, market As String, channel As String)
+    Dim sku As Variant
+    
+    For Each sku In pastedSKUs.Keys
+        Dim pastedData As Variant: pastedData = pastedSKUs(sku)
+        Dim row As Long: row = pastedData(4)
+        
+        ws.Cells(row, 1).Value = row - SKU_START_ROW + 1
+        
+        If skuDataDict.Exists(sku) Then
+            Dim skuData As Variant: skuData = skuDataDict(sku)
+            Dim mli As String: mli = skuData(0)
+            Dim rrp As Double: rrp = skuData(1)
+            Dim bdn As Double: bdn = skuData(2)
+            Dim currentPrice As Double: currentPrice = skuData(3)
+            Dim abc As String: abc = abcDict(sku)
+            
+            ' Write current data
+            ws.Cells(row, COL_CURRENT_RRP).Value = rrp
+            ws.Cells(row, COL_CURRENT_BDN).Value = bdn
+            ws.Cells(row, COL_CURRENT_PRICE).Value = currentPrice
+            ws.Range(ws.Cells(row, COL_CURRENT_RRP), ws.Cells(row, COL_CURRENT_PRICE)).NumberFormat = "£#,##0.00"
+            
+            ' Apply pricing rules
+            Dim ruleResults As Variant
+            ruleResults = ApplyPricingRules(CStr(sku), mli, abc, market, channel, rrp, bdn)
+            
+            Dim minPrice As Double: minPrice = ruleResults(0)
+            Dim maxPrice As Double: maxPrice = ruleResults(1)
+            Dim maxDiscountPct As Double: maxDiscountPct = ruleResults(2) / 100
+            Dim canDiscount As Boolean: canDiscount = ruleResults(3)
+            Dim appliedRules As String: appliedRules = ruleResults(4)
+            
+            ' Write lowest possible price
+            ws.Cells(row, COL_LOWEST_POSSIBLE).Value = minPrice
+            ws.Cells(row, COL_LOWEST_POSSIBLE).NumberFormat = "£#,##0.00"
+            ws.Cells(row, COL_LOWEST_POSSIBLE).Interior.color = RGB(255, 230, 230)
+            
+            ' Get all data for intelligent pricing
+            Dim abcQtyData As Variant
+            If abcQtyDict.Exists(sku) Then
+                abcQtyData = abcQtyDict(sku)
+            Else
+                abcQtyData = Array(0, 0, 0, 0)
+            End If
+            
+            ' Get elasticity and baseline data
+            Dim baseQty As Double: baseQty = 0
+            Dim elasticity As Double: elasticity = 1.5
+            Dim strikeLift As Double: strikeLift = 0.25
+            Dim couponLift As Double: couponLift = 0.2
+            Dim nonStrikeLift As Double: nonStrikeLift = 0.15
+            
+            If promoROIDict.Exists(sku) Then
+                Dim roiData As Variant: roiData = promoROIDict(sku)
+                baseQty = roiData(0)
+                elasticity = roiData(1)
+                strikeLift = roiData(2)
+                couponLift = roiData(3)
+                nonStrikeLift = roiData(4)
+                If elasticity <= 0 Or elasticity > 10 Then elasticity = 1.5
+            End If
+            
+            ' Calculate suggested price with full data integration
+            Dim priceResult As Variant: priceResult = CalculateOptimalSuggestedPrice(rrp, minPrice, maxPrice, maxDiscountPct, CStr(sku), abcQtyData, baseQty, elasticity)
+            Dim suggestedPrice As Double: suggestedPrice = priceResult(0)
+            Dim dataQuality As String: dataQuality = priceResult(1)
+            Dim reasoning As String: reasoning = priceResult(2)
+            
+            ws.Cells(row, COL_SUGGESTED_PRICE).Value = suggestedPrice
+            ws.Cells(row, COL_SUGGESTED_PRICE).NumberFormat = "£#,##0.00"
+            
+            ' Color code based on data quality
+            Select Case dataQuality
+                Case "EXCELLENT": ws.Cells(row, COL_SUGGESTED_PRICE).Interior.color = RGB(200, 255, 200)
+                Case "GOOD": ws.Cells(row, COL_SUGGESTED_PRICE).Interior.color = RGB(220, 255, 220)
+                Case "FAIR": ws.Cells(row, COL_SUGGESTED_PRICE).Interior.color = RGB(255, 255, 200)
+                Case "BASIC": ws.Cells(row, COL_SUGGESTED_PRICE).Interior.color = RGB(245, 245, 245)
+            End Select
+            
+            SafeAddComment ws.Cells(row, COL_SUGGESTED_PRICE), dataQuality & ": " & reasoning
+            
+            ' Write baseline and elasticity
+            ws.Cells(row, COL_BASELINE_QTY).Value = baseQty
+            ws.Cells(row, COL_ELASTICITY).Value = elasticity
+            ws.Cells(row, COL_BASELINE_QTY).NumberFormat = "#,##0.00"
+            ws.Cells(row, COL_ELASTICITY).NumberFormat = "0.00"
+            
+            ' Calculate optimal promo prices with ROI
+            If canDiscount Then
+                ' Strike-Through
+                Dim strikeResult As Variant: strikeResult = CalculateOptimalPromoPriceWithROI(rrp, bdn, minPrice, maxDiscountPct, elasticity, strikeLift, baseQty, "Strike", CStr(sku))
+                ws.Cells(row, COL_STRIKE_PRICE).Value = strikeResult(0)
+                ws.Cells(row, COL_STRIKE_ROI).Value = strikeResult(1)
+                ws.Cells(row, COL_STRIKE_ROI).NumberFormat = "0.0%"
+                
+                ' Coupon
+                Dim couponResult As Variant: couponResult = CalculateOptimalPromoPriceWithROI(rrp, bdn, minPrice, maxDiscountPct, elasticity, couponLift, baseQty, "Coupon", CStr(sku))
+                ws.Cells(row, COL_COUPON_PRICE).Value = couponResult(0)
+                ws.Cells(row, COL_COUPON_ROI).Value = couponResult(1)
+                ws.Cells(row, COL_COUPON_ROI).NumberFormat = "0.0%"
+                
+                ' Non-Strike
+                Dim nonStrikeResult As Variant: nonStrikeResult = CalculateOptimalPromoPriceWithROI(rrp, bdn, minPrice, maxDiscountPct, elasticity, nonStrikeLift, baseQty, "NonStrike", CStr(sku))
+                ws.Cells(row, COL_NONSTRIKE_PRICE).Value = nonStrikeResult(0)
+                ws.Cells(row, COL_NONSTRIKE_ROI).Value = nonStrikeResult(1)
+                ws.Cells(row, COL_NONSTRIKE_ROI).NumberFormat = "0.0%"
+            Else
+                ws.Cells(row, COL_STRIKE_PRICE).Value = rrp
+                ws.Cells(row, COL_COUPON_PRICE).Value = rrp
+                ws.Cells(row, COL_NONSTRIKE_PRICE).Value = rrp
+                ws.Cells(row, COL_STRIKE_ROI).Value = 0
+                ws.Cells(row, COL_COUPON_ROI).Value = 0
+                ws.Cells(row, COL_NONSTRIKE_ROI).Value = 0
+                
+                SafeAddComment ws.Cells(row, COL_STRIKE_PRICE), "No discount allowed: " & appliedRules
+            End If
+            
+            ws.Range(ws.Cells(row, COL_STRIKE_PRICE), ws.Cells(row, COL_NONSTRIKE_PRICE)).NumberFormat = "£#,##0.00"
+            
+            ' Enhanced compliance data
+            If complianceDict.Exists(sku) Then
+                Dim compData As Variant: compData = complianceDict(sku)
+                Dim daysAtRRP As Double: daysAtRRP = compData(0)
+                Dim daysOnPromo As Double: daysOnPromo = compData(1)
+                Dim maxDaysLeft As Double: maxDaysLeft = compData(2)
+                Dim nextLegalDate As Date: nextLegalDate = compData(3)
+                Dim ytdPromoPct As Double: ytdPromoPct = 0
+                
+                If (daysAtRRP + daysOnPromo) > 0 Then
+                    ytdPromoPct = daysOnPromo / (daysAtRRP + daysOnPromo)
+                End If
+                
+                ' Compliance status
+                Dim compStatus As String
+                If currentPrice < rrp And currentPrice > 0 Then
+                    compStatus = "ON PROMO"
+                    ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 242, 204)
+                ElseIf maxDaysLeft <= 0 Then
+                    compStatus = "AT RISK"
+                    ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 200, 200)
+                ElseIf maxDaysLeft <= 7 Then
+                    compStatus = "URGENT"
+                    ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 230, 153)
+                Else
+                    compStatus = "OK"
+                    ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(200, 255, 200)
+                End If
+                
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Value = compStatus
+                ws.Cells(row, COL_DAYS_LEFT).Value = maxDaysLeft
+                ws.Cells(row, COL_NEXT_LEGAL).Value = nextLegalDate
+                ws.Cells(row, COL_NEXT_LEGAL).NumberFormat = "dd/mm/yy"
+                ws.Cells(row, COL_YTD_PROMO_PCT).Value = ytdPromoPct
+                ws.Cells(row, COL_YTD_PROMO_PCT).NumberFormat = "0%"
+                
+                ' Auto-populate planning suggestions if compliant
+                If maxDaysLeft > 0 And canDiscount Then
+                    AutoPopulatePlanningSuggestions ws, row, nextLegalDate, _
+                        ws.Cells(row, COL_STRIKE_PRICE).Value, _
+                        ws.Cells(row, COL_COUPON_PRICE).Value, _
+                        ws.Cells(row, COL_NONSTRIKE_PRICE).Value
+                End If
+            Else
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Value = "NEW"
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 255, 200)
+                ws.Cells(row, COL_DAYS_LEFT).Value = "N/A"
+                ws.Cells(row, COL_NEXT_LEGAL).Value = Date
+                ws.Cells(row, COL_YTD_PROMO_PCT).Value = 0
+            End If
+            
+            ' Color code ROI columns
+            If ws.Cells(row, COL_STRIKE_ROI).Value > 0.5 Then
+                ws.Cells(row, COL_STRIKE_ROI).Interior.color = RGB(200, 255, 200)
+            ElseIf ws.Cells(row, COL_STRIKE_ROI).Value > 0.2 Then
+                ws.Cells(row, COL_STRIKE_ROI).Interior.color = RGB(255, 255, 200)
+            End If
+            
+            If ws.Cells(row, COL_COUPON_ROI).Value > 0.4 Then
+                ws.Cells(row, COL_COUPON_ROI).Interior.color = RGB(200, 255, 200)
+            ElseIf ws.Cells(row, COL_COUPON_ROI).Value > 0.15 Then
+                ws.Cells(row, COL_COUPON_ROI).Interior.color = RGB(255, 255, 200)
+            End If
+            
+            If ws.Cells(row, COL_NONSTRIKE_ROI).Value > 0.3 Then
+                ws.Cells(row, COL_NONSTRIKE_ROI).Interior.color = RGB(200, 255, 200)
+            ElseIf ws.Cells(row, COL_NONSTRIKE_ROI).Value > 0.1 Then
+                ws.Cells(row, COL_NONSTRIKE_ROI).Interior.color = RGB(255, 255, 200)
+            End If
+        End If
+    Next sku
+End Sub
+
+Private Function CalculateOptimalSuggestedPrice(rrp As Double, minPrice As Double, maxPrice As Double, _
+                                              maxDiscountPct As Double, sku As String, abcQtyData As Variant, _
+                                              baseQty As Double, elasticity As Double) As Variant
+    ' Returns array: [price, quality, reasoning]
+    ' SIMPLIFIED: Focus on elasticity to maximize revenue & quantity
+    
+    Dim result As Variant: result = Array(0, "", "")
+    Dim suggestedPrice As Double
+    Dim dataQuality As String
+    Dim reasoning As String
+    
+    ' Data quality based on baseline quantity
+    If baseQty > 50 Then
+        dataQuality = "EXCELLENT"
+    ElseIf baseQty > 10 Then
+        dataQuality = "GOOD"
+    ElseIf baseQty > 2 Then
+        dataQuality = "FAIR"
+    Else
+        dataQuality = "BASIC"
+    End If
+    
+    ' Calculate optimal price based on elasticity
+    If elasticity > 0 And elasticity <= 10 And baseQty > 0 Then
+        ' Optimal discount formula: maximize (1 - discount) * (1 + elasticity * discount)
+        ' This maximizes revenue considering volume increase
+        Dim optimalDiscountPct As Double
+        
+        If elasticity > 3 Then
+            ' High elasticity: deeper discounts drive more volume
+            optimalDiscountPct = 0.15 + (elasticity - 3) * 0.02
+            reasoning = "High elasticity (" & Format(elasticity, "0.0") & ") - volume focused"
+        ElseIf elasticity > 2 Then
+            ' Moderate elasticity
+            optimalDiscountPct = 0.1 + (elasticity - 2) * 0.05
+            reasoning = "Moderate elasticity (" & Format(elasticity, "0.0") & ") - balanced"
+        ElseIf elasticity > 1 Then
+            ' Low elasticity
+            optimalDiscountPct = 0.05 + (elasticity - 1) * 0.05
+            reasoning = "Low elasticity (" & Format(elasticity, "0.0") & ") - margin focused"
+        Else
+            ' Very low elasticity: maintain price
+            optimalDiscountPct = 0
+            reasoning = "Very low elasticity (" & Format(elasticity, "0.0") & ") - RRP maintained"
+        End If
+        
+        ' Cap at max allowed discount
+        If optimalDiscountPct > maxDiscountPct Then
+            optimalDiscountPct = maxDiscountPct
+            reasoning = reasoning & " (capped at max discount)"
+        End If
+        
+        suggestedPrice = rrp * (1 - optimalDiscountPct)
+    Else
+        ' No elasticity data - maintain RRP
+        suggestedPrice = rrp
+        reasoning = "No elasticity data - RRP maintained"
+    End If
+    
+    ' Apply constraints
+    If suggestedPrice < minPrice Then
+        suggestedPrice = minPrice
+        reasoning = reasoning & " (floor applied)"
+    End If
+    If suggestedPrice > maxPrice Then
+        suggestedPrice = maxPrice
+        reasoning = reasoning & " (ceiling applied)"
+    End If
+    
+    result(0) = Round(suggestedPrice, 2)
+    result(1) = dataQuality
+    result(2) = reasoning
+    
+    CalculateOptimalSuggestedPrice = result
+End Function
+
+Private Function CalculateOptimalPromoPriceWithROI(rrp As Double, bdn As Double, minPrice As Double, _
+                                                  maxDiscountPct As Double, elasticity As Double, _
+                                                  promoLift As Double, baseQty As Double, _
+                                                  promoType As String, sku As String) As Variant
+    ' Returns array: [price, ROI%]
+    Dim result As Variant: result = Array(0, 0)
+    
+    ' Get current month seasonality
+    Dim currentMonth As Long: currentMonth = Month(Date)
+    Dim seasonality As Double: seasonality = GetMonthlySeasonality(sku, currentMonth)
+    
+    ' Calculate optimal discount based on elasticity and promo effectiveness
+    Dim optimalDiscount As Double
+    
+    If elasticity > 0 And elasticity <= 10 And promoLift > 0 Then
+        ' Start with elasticity-based optimal discount
+        optimalDiscount = 1 / (1 + elasticity)
+        
+        ' Adjust by promo type
+        Select Case promoType
+            Case "Strike"
+                optimalDiscount = optimalDiscount * 1.2  ' Can be more aggressive
+            Case "Coupon"
+                optimalDiscount = optimalDiscount * 1#   ' Standard
+            Case "NonStrike"
+                optimalDiscount = optimalDiscount * 0.8  ' More conservative
+        End Select
+        
+        ' Adjust by historical lift performance
+        If promoLift > 0.3 Then
+            optimalDiscount = optimalDiscount * 0.9  ' High lift = can use smaller discount
+        ElseIf promoLift < 0.15 Then
+            optimalDiscount = optimalDiscount * 1.1  ' Low lift = need deeper discount
+        End If
+        
+        ' Seasonal adjustment
+        If seasonality > 1.2 Then
+            optimalDiscount = optimalDiscount * 0.85  ' High season = smaller discount
+        ElseIf seasonality < 0.8 Then
+            optimalDiscount = optimalDiscount * 1.15  ' Low season = deeper discount
+        End If
+    Else
+        ' Fallback discounts
+        Select Case promoType
+            Case "Strike": optimalDiscount = 0.2
+            Case "Coupon": optimalDiscount = 0.15
+            Case "NonStrike": optimalDiscount = 0.1
+        End Select
+    End If
+    
+    ' Apply constraints
+    If optimalDiscount > maxDiscountPct Then optimalDiscount = maxDiscountPct
+    If optimalDiscount < 0.05 Then optimalDiscount = 0.05
+    
+    ' Calculate price
+    Dim optimalPrice As Double: optimalPrice = rrp * (1 - optimalDiscount)
+    If optimalPrice < minPrice Then optimalPrice = minPrice
+    
+    ' Calculate ROI
+    Dim roi As Double: roi = 0
+    If baseQty > 0 And bdn > 0 Then
+        ' Calculate incremental units
+        Dim baselineRevenue As Double: baselineRevenue = baseQty * rrp * 30.44 * seasonality
+        Dim promoUnits As Double: promoUnits = baseQty * 30.44 * seasonality * (1 + promoLift)
+        Dim promoRevenue As Double: promoRevenue = promoUnits * optimalPrice
+        
+        ' Calculate incremental profit
+        Dim baseCost As Double: baseCost = baseQty * 30.44 * seasonality * bdn
+        Dim promoCost As Double: promoCost = promoUnits * bdn
+        
+        Dim baseProfit As Double: baseProfit = baselineRevenue - baseCost
+        Dim promoProfit As Double: promoProfit = promoRevenue - promoCost
+        Dim incrementalProfit As Double: incrementalProfit = promoProfit - baseProfit
+        
+        ' ROI = incremental profit / discount investment
+        Dim discountInvestment As Double: discountInvestment = (rrp - optimalPrice) * baseQty * 30.44 * seasonality
+        
+        If discountInvestment > 0 Then
+            roi = incrementalProfit / discountInvestment
+        End If
+    End If
+    
+    result(0) = Round(optimalPrice, 2)
+    result(1) = roi
+    
+    CalculateOptimalPromoPriceWithROI = result
+End Function
+
+Private Function GetMonthlySeasonality(sku As String, monthIndex As Long) As Double
+    ' Get seasonality factor for specific month
+    Dim factor As Double: factor = 1#
+    
+    If seasonalityDict.Exists(sku) Then
+        Dim monthFactors As Variant: monthFactors = seasonalityDict(sku)
+        If monthIndex >= 1 And monthIndex <= 12 Then
+            factor = monthFactors(monthIndex - 1)
+            If factor <= 0 Or factor > 5 Then factor = 1
+        End If
+    End If
+    
+    GetMonthlySeasonality = factor
+End Function
+
+Private Sub AutoPopulatePlanningSuggestions(ws As Worksheet, row As Long, nextLegalDate As Date, _
+                                           strikePrice As Double, couponPrice As Double, nonStrikePrice As Double)
+    ' Auto-populate planning grid with intelligent suggestions
+    Dim planCol As Long: planCol = COL_PLANNING_START
+    Dim suggestionDate As Date: suggestionDate = Application.Max(nextLegalDate, Date + 1)
+    
+    ' First month - Strike-Through (best ROI typically)
+    If suggestionDate <= DateAdd("m", 1, Date) Then
+        Dim col1 As Long: col1 = planCol
+        ws.Cells(row, col1).Value = "Strike-Through"
+        ws.Cells(row, col1 + 1).Value = strikePrice
+        ws.Cells(row, col1 + 2).Value = suggestionDate
+        ws.Cells(row, col1 + 3).Value = suggestionDate + 6
+        ws.Range(ws.Cells(row, col1), ws.Cells(row, col1 + 3)).Font.Italic = True
+        ws.Range(ws.Cells(row, col1), ws.Cells(row, col1 + 3)).Font.color = RGB(100, 100, 100)
+    End If
+    
+    ' Second month - Coupon
+    suggestionDate = DateAdd("m", 1, suggestionDate)
+    If suggestionDate <= DateAdd("m", 2, Date) Then
+        Dim col2 As Long: col2 = planCol + 16
+        ws.Cells(row, col2).Value = "Coupon"
+        ws.Cells(row, col2 + 1).Value = couponPrice
+        ws.Cells(row, col2 + 2).Value = DateSerial(Year(suggestionDate), Month(suggestionDate), 1)
+        ws.Cells(row, col2 + 3).Value = DateSerial(Year(suggestionDate), Month(suggestionDate), 7)
+        ws.Range(ws.Cells(row, col2), ws.Cells(row, col2 + 3)).Font.Italic = True
+        ws.Range(ws.Cells(row, col2), ws.Cells(row, col2 + 3)).Font.color = RGB(100, 100, 100)
+    End If
+End Sub
+
+Private Sub CalculateMLIPromoCounts(ws As Worksheet, market As String, channel As String)
+    Dim mliPromoCounts As Object: Set mliPromoCounts = CreateObject("Scripting.Dictionary")
+    
+    Dim row As Long
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        Dim mli As String: mli = ws.Cells(row, COL_MLI).Value
+        If mli <> "" Then
+            If Not mliPromoCounts.Exists(mli) Then
+                mliPromoCounts(mli) = Array(0, 0, 0)
+            End If
+            
+            Dim counts As Variant: counts = mliPromoCounts(mli)
+            counts(1) = counts(1) + 1
+            
+            Dim currentPrice As Double: currentPrice = Val(ws.Cells(row, COL_CURRENT_PRICE).Value)
+            Dim currentRRP As Double: currentRRP = Val(ws.Cells(row, COL_CURRENT_RRP).Value)
+            
+            If currentPrice < currentRRP And currentPrice > 0 Then
+                counts(0) = counts(0) + 1
+            End If
+            
+            mliPromoCounts(mli) = counts
+        End If
+    Next row
+    
+    ' Apply MLI promo limit rules
+    On Error Resume Next
+    Dim rulesWs As Worksheet: Set rulesWs = ThisWorkbook.Worksheets("PricingRules")
+    If rulesWs Is Nothing Then Exit Sub
+    
+    Dim mliLimits As Object: Set mliLimits = CreateObject("Scripting.Dictionary")
+    
+    ' Find MLI sku_limit rules
+    Dim ruleRow As Long
+    For ruleRow = 5 To rulesWs.Cells(rulesWs.Rows.Count, 1).End(xlUp).row
+        If UCase(rulesWs.Cells(ruleRow, 1).Value) = "TRUE" Then
+            Dim ruleType As String: ruleType = LCase(rulesWs.Cells(ruleRow, 3).Value)
+            If ruleType = "sku_limit" Or ruleType = "promo_balance" Then
+                Dim scope As String: scope = UCase(rulesWs.Cells(ruleRow, 4).Value)
+                Dim scopeValues As String: scopeValues = rulesWs.Cells(ruleRow, 5).Value
+                Dim limitValue As Double: limitValue = Val(rulesWs.Cells(ruleRow, 6).Value) / 100
+                
+                If scope = "MLI" Then
+                    Dim mlis() As String: mlis = Split(scopeValues, ",")
+                    Dim i As Long
+                    For i = 0 To UBound(mlis)
+                        mliLimits(Trim(mlis(i))) = limitValue
+                    Next i
+                End If
+            End If
+        End If
+    Next ruleRow
+    On Error GoTo 0
+    
+    ' Write MLI promo percentages
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        mli = ws.Cells(row, COL_MLI).Value
+        If mli <> "" And mliPromoCounts.Exists(mli) Then
+            counts = mliPromoCounts(mli)
+            Dim promoPct As Double: promoPct = 0
+            If counts(1) > 0 Then promoPct = counts(0) / counts(1)
+            
+            ws.Cells(row, COL_MLI_PROMO_COUNT).Value = Format(promoPct, "0%")
+            
+            ' Check against limit
+            If mliLimits.Exists(mli) Then
+                Dim maxAllowed As Double: maxAllowed = mliLimits(mli)
+                If promoPct > maxAllowed Then
+                    ws.Cells(row, COL_MLI_PROMO_COUNT).Interior.color = RGB(255, 200, 200)
+                    SafeAddComment ws.Cells(row, COL_MLI_PROMO_COUNT), _
+                        "Over limit: " & Format(promoPct, "0%") & " > " & Format(maxAllowed, "0%")
+                Else
+                    ws.Cells(row, COL_MLI_PROMO_COUNT).Interior.color = RGB(200, 255, 200)
+                End If
+            ElseIf promoPct > 0.5 Then
+                ws.Cells(row, COL_MLI_PROMO_COUNT).Interior.color = RGB(255, 255, 200)
+            Else
+                ws.Cells(row, COL_MLI_PROMO_COUNT).Interior.color = RGB(200, 255, 200)
+            End If
+        End If
+    Next row
+End Sub
+
+Private Sub ShowDataQualitySummary(ws As Worksheet, totalSKUs As Long)
+    Dim excellentCount As Long, goodCount As Long, fairCount As Long, basicCount As Long
+    Dim row As Long
+    
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        Dim cellColor As Long: cellColor = ws.Cells(row, COL_SUGGESTED_PRICE).Interior.color
+        
+        Select Case cellColor
+            Case RGB(200, 255, 200): excellentCount = excellentCount + 1
+            Case RGB(220, 255, 220): goodCount = goodCount + 1
+            Case RGB(255, 255, 200): fairCount = fairCount + 1
+            Case RGB(245, 245, 245): basicCount = basicCount + 1
+            Case Else: basicCount = basicCount + 1
+        End Select
+    Next row
+    
+    ' Position at top right, away from main data
+    With ws
+        .Range("AB3").Value = "DATA QUALITY"
+        .Range("AB3").Font.Bold = True
+        .Range("AB3").Interior.color = RGB(0, 102, 204)
+        .Range("AB3").Font.color = RGB(255, 255, 255)
+        
+        .Range("AB4").Value = "Excellent:"
+        .Range("AC4").Value = excellentCount & " (" & Format(excellentCount / totalSKUs, "0%") & ")"
+        .Range("AC4").Interior.color = RGB(200, 255, 200)
+        
+        .Range("AB5").Value = "Good:"
+        .Range("AC5").Value = goodCount & " (" & Format(goodCount / totalSKUs, "0%") & ")"
+        .Range("AC5").Interior.color = RGB(220, 255, 220)
+        
+        .Range("AB6").Value = "Fair:"
+        .Range("AC6").Value = fairCount & " (" & Format(fairCount / totalSKUs, "0%") & ")"
+        .Range("AC6").Interior.color = RGB(255, 255, 200)
+        
+        .Range("AB7").Value = "Basic:"
+        .Range("AC7").Value = basicCount & " (" & Format(basicCount / totalSKUs, "0%") & ")"
+        .Range("AC7").Interior.color = RGB(245, 245, 245)
+        
+        .Range("AB3:AC7").Borders.LineStyle = xlContinuous
+        .Range("AB3:AC7").Font.Size = 9
+    End With
+End Sub
+
+Sub CheckCompliance()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+    
+    Application.ScreenUpdating = False
+    
+    If complianceDict Is Nothing Then
+        Set complianceDict = CreateObject("Scripting.Dictionary")
+        LoadComplianceData
+    End If
+    
+    Dim row As Long
+    For row = SKU_START_ROW To lastRow
+        Dim sku As String: sku = UCase(ws.Cells(row, COL_SKU).Value)
+        
+        If complianceDict.Exists(sku) Then
+            Dim compData As Variant: compData = complianceDict(sku)
+            Dim maxDaysLeft As Double: maxDaysLeft = compData(2)
+            
+            If maxDaysLeft > 0 Then
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Value = "OK"
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(200, 255, 200)
+            Else
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Value = "AT RISK"
+                ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 200, 200)
+            End If
+        Else
+            ws.Cells(row, COL_COMPLIANCE_STATUS).Value = "NEW"
+            ws.Cells(row, COL_COMPLIANCE_STATUS).Interior.color = RGB(255, 255, 200)
+        End If
+    Next row
+    
+    Application.ScreenUpdating = True
+    MsgBox "Compliance check complete!", vbInformation
+End Sub
+
+Sub BulkSelectSKUs()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    
+    Dim selectType As String
+    selectType = InputBox("Select by:" & vbCrLf & _
+                         "1 = MLI" & vbCrLf & _
+                         "2 = ABC" & vbCrLf & _
+                         "3 = Price Range" & vbCrLf & _
+                         "4 = Compliance Status" & vbCrLf & _
+                         "5 = ROI Threshold", "Bulk Select", "1")
+    
+    If selectType = "" Then Exit Sub
+    
+    Application.ScreenUpdating = False
+    
+    Select Case selectType
+        Case "1"  ' MLI
+            Dim mli As String: mli = InputBox("Enter MLI code:", "Select by MLI")
+            If mli <> "" Then
+                Dim row As Long
+                For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+                    If ws.Cells(row, COL_MLI).Value = mli Then
+                        ws.Cells(row, COL_SELECT).Value = "YES"
+                        ws.Rows(row).Interior.color = RGB(220, 230, 241)
+                    End If
+                Next row
+            End If
+            
+        Case "2"  ' ABC
+            Dim abc As String: abc = InputBox("Enter ABC code (A/B/C):", "Select by ABC")
+            If abc <> "" Then
+                For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+                    If ws.Cells(row, COL_ABC).Value = abc Then
+                        ws.Cells(row, COL_SELECT).Value = "YES"
+                        ws.Rows(row).Interior.color = RGB(220, 230, 241)
+                    End If
+                Next row
+            End If
+            
+        Case "3"  ' Price range
+            Dim minPrice As Double: minPrice = Val(InputBox("Minimum price:", "Price Range"))
+            Dim maxPrice As Double: maxPrice = Val(InputBox("Maximum price:", "Price Range"))
+            If maxPrice > minPrice Then
+                For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+                    Dim price As Double: price = Val(ws.Cells(row, COL_CURRENT_PRICE).Value)
+                    If price >= minPrice And price <= maxPrice Then
+                        ws.Cells(row, COL_SELECT).Value = "YES"
+                        ws.Rows(row).Interior.color = RGB(220, 230, 241)
+                    End If
+                Next row
+            End If
+            
+        Case "4"  ' Compliance
+            Dim compStatus As String: compStatus = InputBox("Enter status (OK/AT RISK/NEW):", "Select by Compliance")
+            If compStatus <> "" Then
+                For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+                    If ws.Cells(row, COL_COMPLIANCE).Value = compStatus Then
+                        ws.Cells(row, COL_SELECT).Value = "YES"
+                        ws.Rows(row).Interior.color = RGB(220, 230, 241)
+                    End If
+                Next row
+            End If
+            
+        Case "5"  ' ROI Threshold
+            Dim minROI As Double: minROI = Val(InputBox("Minimum ROI % (e.g., 20 for 20%):", "Select by ROI")) / 100
+            If minROI > 0 Then
+                For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+                    Dim maxROI As Double: maxROI = Application.Max( _
+                        Val(ws.Cells(row, COL_STRIKE_ROI).Value), _
+                        Val(ws.Cells(row, COL_COUPON_ROI).Value), _
+                        Val(ws.Cells(row, COL_NONSTRIKE_ROI).Value))
+                    If maxROI >= minROI Then
+                        ws.Cells(row, COL_SELECT).Value = "YES"
+                        ws.Rows(row).Interior.color = RGB(220, 230, 241)
+                    End If
+                Next row
+            End If
+    End Select
+    
+    Application.ScreenUpdating = True
+    
+    Dim selectedCount As Long
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        If ws.Cells(row, COL_SELECT).Value = "YES" Then selectedCount = selectedCount + 1
+    Next row
+    
+    MsgBox selectedCount & " SKUs selected.", vbInformation
+End Sub
+
+Sub ClearSelection()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    Application.ScreenUpdating = False
+    
+    Dim row As Long
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        ws.Cells(row, COL_SELECT).Value = "NO"
+        ws.Rows(row).Interior.color = xlNone
+    Next row
+    
+    Application.ScreenUpdating = True
+    MsgBox "Selection cleared.", vbInformation
+End Sub
+
+Sub ExportToSharePoint()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    
+    Dim promoType As String
+    promoType = InputBox("Enter promo type:" & vbCrLf & _
+                        "1 = Strike-Through" & vbCrLf & _
+                        "2 = Coupon" & vbCrLf & _
+                        "3 = Non-Strike-Through" & vbCrLf & _
+                        "4 = RRP", "Promo Type", "1")
+    
+    If promoType = "" Then Exit Sub
+    
+    Dim promoTypeName As String
+    Dim priceCol As Long
+    Select Case promoType
+        Case "1": promoTypeName = "Strike-Through": priceCol = COL_STRIKE_PRICE
+        Case "2": promoTypeName = "Coupon": priceCol = COL_COUPON_PRICE
+        Case "3": promoTypeName = "Non-Strike-Through": priceCol = COL_NONSTRIKE_PRICE
+        Case "4": promoTypeName = "RRP": priceCol = COL_CURRENT_RRP
+        Case Else: Exit Sub
+    End Select
+    
+    Dim startDate As Date: startDate = CDate(InputBox("Start date (dd/mm/yyyy):", "Promo Dates", Format(Date + 7, "dd/mm/yyyy")))
+    Dim endDate As Date: endDate = CDate(InputBox("End date (dd/mm/yyyy):", "Promo Dates", Format(startDate + 6, "dd/mm/yyyy")))
+    
+    If endDate < startDate Then
+        MsgBox "End date must be after start date!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim selectedCount As Long
+    Dim row As Long
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        If ws.Cells(row, COL_SELECT).Value = "YES" Then selectedCount = selectedCount + 1
+    Next row
+    
+    If selectedCount = 0 Then
+        MsgBox "No SKUs selected!", vbExclamation
+        Exit Sub
+    End If
+    
+    If MsgBox("Export " & selectedCount & " SKUs with " & promoTypeName & " promo from " & _
+              Format(startDate, "dd/mm/yyyy") & " to " & Format(endDate, "dd/mm/yyyy") & "?", _
+              vbYesNo + vbQuestion) = vbNo Then Exit Sub
+    
+    ' Create export sheet
+    Dim exportWs As Worksheet
+    On Error Resume Next
+    Set exportWs = ThisWorkbook.Worksheets("Export")
+    If exportWs Is Nothing Then
+        Set exportWs = ThisWorkbook.Worksheets.Add
+        exportWs.Name = "Export"
+    Else
+        exportWs.Cells.Clear
+    End If
+    On Error GoTo 0
+    
+    ' Headers
+    exportWs.Range("A1").Value = "SKU"
+    exportWs.Range("B1").Value = "PromoType"
+    exportWs.Range("C1").Value = "PromoPrice"
+    exportWs.Range("D1").Value = "DiscountValue"
+    exportWs.Range("E1").Value = "StartDate"
+    exportWs.Range("F1").Value = "EndDate"
+    exportWs.Range("G1").Value = "ExpectedROI"
+    
+    Dim exportRow As Long: exportRow = 2
+    
+    For row = SKU_START_ROW To ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+        If ws.Cells(row, COL_SELECT).Value = "YES" Then
+            exportWs.Cells(exportRow, 1).Value = ws.Cells(row, COL_SKU).Value
+            exportWs.Cells(exportRow, 2).Value = promoTypeName
+            exportWs.Cells(exportRow, 3).Value = ws.Cells(row, priceCol).Value
+            
+            Dim rrp As Double: rrp = Val(ws.Cells(row, COL_CURRENT_RRP).Value)
+            Dim promoPrice As Double: promoPrice = Val(ws.Cells(row, priceCol).Value)
+            Dim discount As Double: discount = 0
+            If rrp > 0 Then discount = (rrp - promoPrice) / rrp
+            
+            exportWs.Cells(exportRow, 4).Value = Format(discount, "0%")
+            exportWs.Cells(exportRow, 5).Value = startDate
+            exportWs.Cells(exportRow, 6).Value = endDate
+            
+            Select Case promoType
+                Case "1": exportWs.Cells(exportRow, 7).Value = ws.Cells(row, COL_STRIKE_ROI).Value
+                Case "2": exportWs.Cells(exportRow, 7).Value = ws.Cells(row, COL_COUPON_ROI).Value
+                Case "3": exportWs.Cells(exportRow, 7).Value = ws.Cells(row, COL_NONSTRIKE_ROI).Value
+                Case "4": exportWs.Cells(exportRow, 7).Value = 0
+            End Select
+            
+            exportRow = exportRow + 1
+        End If
+    Next row
+    
+    Application.StatusBar = False
+    MsgBox "Export complete! " & selectedCount & " SKUs exported to 'Export' sheet.", vbInformation
+End Sub
+
+Sub ExportPlan()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(PLANNER_SHEET)
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, COL_SKU).End(xlUp).row
+    
+    ' Create export sheet
+    Dim exportWs As Worksheet
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("PromoExport").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    
+    Set exportWs = ThisWorkbook.Worksheets.Add
+    exportWs.Name = "PromoExport"
+    
+    ' Headers
+    With exportWs
+        .Range("A1").Value = "SKU"
+        .Range("B1").Value = "Market"
+        .Range("C1").Value = "Channel"
+        .Range("D1").Value = "Brand"
+        .Range("E1").Value = "SKUType"
+        .Range("F1").Value = "DiscountType"
+        .Range("G1").Value = "DiscountAmt"
+        .Range("H1").Value = "StartDate"
+        .Range("I1").Value = "EndDate"
+        .Range("J1").Value = "RRPMaster"
+        .Range("K1").Value = "SellPriceMaster"
+        .Range("L1").Value = "Month"
+        .Range("M1").Value = "PromoSlot"
+        
+        .Range("A1:M1").Font.Bold = True
+        .Range("A1:M1").Interior.color = RGB(200, 200, 200)
+    End With
+    
+    Dim exportRow As Long: exportRow = 2
+    Dim planCol As Long: planCol = COL_PLANNING_START
+    Dim row As Long, m As Long, p As Long
+    
+    ' Get market/channel from named ranges or defaults
+    Dim market As String: market = "UK"
+    Dim channel As String: channel = "Online"
+    On Error Resume Next
+    market = Range("Market").Value
+    channel = Range("Channel").Value
+    On Error GoTo 0
+    
+    ' Process each SKU
+    For row = SKU_START_ROW To lastRow
+        Dim sku As String: sku = ws.Cells(row, COL_SKU).Value
+        If sku <> "" And sku <> "Paste SKUs here" Then
+            Dim rrp As Double: rrp = Val(ws.Cells(row, COL_CURRENT_RRP).Value)
+            
+            ' Check each month/promo slot
+            For m = 1 To PLANNING_MONTHS
+                For p = 1 To PROMOS_PER_MONTH
+                    Dim typeCol As Long: typeCol = planCol + ((m - 1) * PROMOS_PER_MONTH * 4) + ((p - 1) * 4)
+                    
+                    Dim promoType As String: promoType = ws.Cells(row, typeCol).Value
+                    Dim promoPrice As Double: promoPrice = Val(ws.Cells(row, typeCol + 1).Value)
+                    Dim startDate As Variant: startDate = ws.Cells(row, typeCol + 2).Value
+                    Dim endDate As Variant: endDate = ws.Cells(row, typeCol + 3).Value
+                    
+                    If promoType <> "" And promoType <> "None" And IsDate(startDate) And IsDate(endDate) Then
+                        ' Calculate discount
+                        Dim discountAmt As Double
+                        If rrp > 0 Then
+                            discountAmt = Round((rrp - promoPrice) / rrp, 3)
+                        End If
+                        
+                        ' Write export row
+                        With exportWs
+                            .Cells(exportRow, 1).Value = sku
+                            .Cells(exportRow, 2).Value = market
+                            .Cells(exportRow, 3).Value = channel
+                            .Cells(exportRow, 4).Value = "Ford"
+                            .Cells(exportRow, 5).Value = "Standard"
+                            .Cells(exportRow, 6).Value = promoType
+                            .Cells(exportRow, 7).Value = discountAmt
+                            .Cells(exportRow, 8).Value = CDate(startDate)
+                            .Cells(exportRow, 9).Value = CDate(endDate)
+                            .Cells(exportRow, 10).Value = rrp
+                            .Cells(exportRow, 11).Value = promoPrice
+                            .Cells(exportRow, 12).Value = Format(CDate(startDate), "yyyy-mm")
+                            .Cells(exportRow, 13).Value = "P" & p
+                            
+                            .Cells(exportRow, 8).NumberFormat = "dd/mm/yyyy"
+                            .Cells(exportRow, 9).NumberFormat = "dd/mm/yyyy"
+                        End With
+                        
+                        exportRow = exportRow + 1
+                    End If
+                Next p
+            Next m
+        End If
+    Next row
+    
+    ' Format export sheet
+    With exportWs
+        .Columns("A:M").AutoFit
+        .Activate
+    End With
+    
+    MsgBox "Export complete! " & (exportRow - 2) & " promos exported to 'PromoExport' sheet.", vbInformation
+End Sub
+
+Private Sub LoadComplianceData()
+    On Error Resume Next
+    Dim compWs As Worksheet: Set compWs = ThisWorkbook.Worksheets("Compliance")
+    If compWs Is Nothing Then Exit Sub
+    
+    Dim lastRow As Long: lastRow = compWs.Cells(compWs.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then Exit Sub
+    
+    Dim compArr As Variant: compArr = compWs.Range("A1:L" & lastRow).Value
+    
+    Dim skuCol As Long, daysRRPCol As Long, daysPromoCol As Long
+    Dim maxDaysCol As Long, nextLegalCol As Long, i As Long
+    
+    For i = 1 To UBound(compArr, 2)
+        Select Case UCase(Trim(CStr(compArr(1, i))))
+            Case "SKU": skuCol = i
+            Case "DAYSATRRP": daysRRPCol = i
+            Case "DAYSONPROMO": daysPromoCol = i
+            Case "MAXDAYSLEFT50": maxDaysCol = i
+            Case "NEXTPROMODATE": nextLegalCol = i
+        End Select
+    Next i
+    
+    For i = 2 To UBound(compArr, 1)
+        Dim sku As String: sku = UCase(Trim(CStr(compArr(i, skuCol))))
+        If sku <> "" Then
+            Dim nextLegalDate As Date
+            On Error Resume Next
+            nextLegalDate = CDate(compArr(i, nextLegalCol))
+            If Err.Number <> 0 Then nextLegalDate = Date
+            On Error GoTo 0
+            
+            complianceDict(sku) = Array( _
+                Val(compArr(i, daysRRPCol)), _
+                Val(compArr(i, daysPromoCol)), _
+                Val(compArr(i, maxDaysCol)), _
+                nextLegalDate _
+            )
+        End If
+    Next i
+    On Error GoTo 0
+End Sub
+
+
+
