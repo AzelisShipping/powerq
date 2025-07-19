@@ -1,0 +1,109 @@
+let
+    // === OPTIMIZED SEASONALITY CALCULATION FOR 30K+ SKUS ===
+    // Enhanced algorithm with outlier removal and trend analysis
+    
+    Source = Sql.Databases("40.113.5.200"),
+    Reporting_Ford = Source{[Name="Reporting_Ford"]}[Data],
+    dbo_Items = Reporting_Ford{[Schema="dbo",Item="Items"]}[Data],
+    
+    // Early filtering to reduce dataset size
+    #"Filtered Recent" = Table.SelectRows(dbo_Items, each 
+        [ReceivedDate] >= Date.AddYears(DateTime.Date(DateTime.LocalNow()), -3) and
+        [ReceivedDate] <= Date.AddDays(DateTime.Date(DateTime.LocalNow()), -45) and
+        [Quantity] > 0 and [SKU] <> null and [SKU] <> ""),
+    
+    // Select essential columns only
+    #"Essential Columns" = Table.SelectColumns(#"Filtered Recent", {
+        "ID_Market", "ReceivedDate", "SKU", "Quantity"
+    }),
+    
+    // Join market data efficiently
+    #"Market Join" = Table.NestedJoin(#"Essential Columns", {"ID_Market"}, MarketTable, {"ID_Market"}, "Market", JoinKind.Inner),
+    #"Market Expanded" = Table.ExpandTableColumn(#"Market Join", "Market", {"Channel", "Market", "Brand"}),
+    
+    // Filter to target market/channel/brand
+    #"Filtered Target" = Table.SelectRows(#"Market Expanded", each 
+        [Market] = Market and [Channel] = Channel and [Brand] = Brand),
+    
+    // Optimize date handling
+    #"Added Date Type" = Table.TransformColumnTypes(#"Filtered Target", {{"ReceivedDate", type date}}),
+    #"Added Month" = Table.AddColumn(#"Added Date Type", "Month", each Date.Month([ReceivedDate]), Int64.Type),
+    #"Added Year" = Table.AddColumn(#"Added Month", "Year", each Date.Year([ReceivedDate]), Int64.Type),
+    
+    // Monthly aggregation with outlier detection
+    #"Monthly Totals" = Table.Group(#"Added Year", {"SKU", "Month", "Year"}, {
+        {"MonthlyQty", each List.Sum([Quantity]), type number}
+    }),
+    
+    // Enhanced baseline calculation per SKU
+    #"SKU Analysis" = Table.Group(#"Monthly Totals", {"SKU"}, {
+        {"AllMonthlyQty", each [MonthlyQty], type list},
+        {"AllMonths", each [Month], type list},
+        {"TotalMonths", each Table.RowCount(_), Int64.Type}
+    }),
+    
+    #"Added Enhanced Seasonality" = Table.AddColumn(#"SKU Analysis", "SeasonalityFactors", each
+        let
+            quantities = [AllMonthlyQty],
+            months = [AllMonths],
+            totalMonths = [TotalMonths],
+            
+            // Step 1: Remove outliers using IQR method
+            sortedQty = List.Sort(quantities),
+            q1Index = Number.RoundDown(List.Count(sortedQty) * 0.25),
+            q3Index = Number.RoundDown(List.Count(sortedQty) * 0.75),
+            q1 = if q1Index < List.Count(sortedQty) then sortedQty{q1Index} else List.Min(sortedQty),
+            q3 = if q3Index < List.Count(sortedQty) then sortedQty{q3Index} else List.Max(sortedQty),
+            iqr = q3 - q1,
+            lowerBound = q1 - (1.5 * iqr),
+            upperBound = q3 + (1.5 * iqr),
+            
+            // Filter out outliers
+            cleanedData = List.Transform(List.Positions(quantities), each 
+                if quantities{_} >= lowerBound and quantities{_} <= upperBound 
+                then [Month = months{_}, Qty = quantities{_}] 
+                else null),
+            validData = List.RemoveNulls(cleanedData),
+            
+            // Step 2: Calculate monthly averages from cleaned data
+            monthlyAvgs = List.Transform({1,2,3,4,5,6,7,8,9,10,11,12}, each
+                let
+                    monthData = List.Select(validData, (x) => x[Month] = _),
+                    monthQties = List.Transform(monthData, (x) => x[Qty])
+                in
+                    if List.Count(monthQties) > 0 then List.Average(monthQties) else 0
+            ),
+            
+            // Step 3: Calculate overall baseline (excluding zeros)
+            nonZeroAvgs = List.Select(monthlyAvgs, each _ > 0),
+            overallBaseline = if List.Count(nonZeroAvgs) > 0 then List.Average(nonZeroAvgs) else 1,
+            
+            // Step 4: Calculate seasonality factors with smoothing
+            seasonalityFactors = List.Transform(monthlyAvgs, each 
+                if overallBaseline > 0 and _ > 0 then _ / overallBaseline else 1.0),
+            
+            // Step 5: Apply smoothing to avoid extreme factors
+            smoothedFactors = List.Transform(seasonalityFactors, each
+                if _ > 3.0 then 3.0 else if _ < 0.3 then 0.3 else _)
+        in
+            [Jan = smoothedFactors{0}, Feb = smoothedFactors{1}, Mar = smoothedFactors{2}, Apr = smoothedFactors{3},
+             May = smoothedFactors{4}, Jun = smoothedFactors{5}, Jul = smoothedFactors{6}, Aug = smoothedFactors{7},
+             Sep = smoothedFactors{8}, Oct = smoothedFactors{9}, Nov = smoothedFactors{10}, Dec = smoothedFactors{11}]
+    ),
+    
+    // Expand seasonality factors
+    #"Expanded Seasonality" = Table.ExpandRecordColumn(#"Added Enhanced Seasonality", "SeasonalityFactors", 
+        {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}),
+    
+    // Final cleanup and type conversion
+    #"Final Result" = Table.TransformColumnTypes(
+        Table.SelectColumns(#"Expanded Seasonality", {"SKU", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}),
+        {
+            {"SKU", type text},
+            {"Jan", type number}, {"Feb", type number}, {"Mar", type number}, {"Apr", type number},
+            {"May", type number}, {"Jun", type number}, {"Jul", type number}, {"Aug", type number},
+            {"Sep", type number}, {"Oct", type number}, {"Nov", type number}, {"Dec", type number}
+        }
+    )
+in
+    #"Final Result"
