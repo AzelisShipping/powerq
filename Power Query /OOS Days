@@ -1,0 +1,39 @@
+let
+    // SQL connection
+    Source              = Sql.Databases("40.113.5.200"),
+    Stock_Ford          = Source{[Name="Stock_Ford"]}[Data],
+    dbo_PBi_OOS_Periods = Stock_Ford{[Schema="dbo", Item="PBi_OOS_Periods"]}[Data],
+
+    // lookup market / brand / channel
+    Merged   = Table.NestedJoin(dbo_PBi_OOS_Periods, {"ID_Market"}, MarketTable, {"ID_Market"}, "Lkp", JoinKind.LeftOuter),
+    Expanded = Table.ExpandTableColumn(Merged, "Lkp", {"Brand", "Channel", "Market"}, {"Brand", "Channel", "Market"}),
+
+    //-------------------------------------
+    // Hard-code your selections here
+    BrandVal   = "Ford",
+    ChannelVal = "Amazon",
+    MarketVal  = "UK",
+    //-------------------------------------
+
+    Filtered = Table.SelectRows(Expanded, each [Brand]=BrandVal and [Channel]=ChannelVal and [Market]=MarketVal),
+
+    // date anchors
+    Today          = Date.From(DateTime.LocalNow()),
+    StartPrevMonth = Date.StartOfMonth(Date.AddMonths(Today,-1)),
+    EndPrevMonth   = Date.EndOfMonth(Date.AddMonths(Today,-1)),
+    Start6M        = Date.AddMonths(Today,-6),
+    Start1Y        = Date.AddYears(Today,-1),
+
+    // add bucket columns
+    AddLM = Table.AddColumn(Filtered, "LM", each if [StartOOS]>=StartPrevMonth and [StartOOS]<=EndPrevMonth then [DaysOOS] else 0, Int64.Type),
+    AddM6 = Table.AddColumn(AddLM,   "M6", each if [StartOOS]>=Start6M    then [DaysOOS] else 0, Int64.Type),
+    AddYR = Table.AddColumn(AddM6,   "YR", each if [StartOOS]>=Start1Y    then [DaysOOS] else 0, Int64.Type),
+
+    // summarise by SKU
+    Summary = Table.Group(AddYR, {"SKU"}, {
+        {"DaysOOS_LastMonth", each List.Sum([LM]), Int64.Type},
+        {"DaysOOS_Last6M",    each List.Sum([M6]), Int64.Type},
+        {"DaysOOS_LastYear",  each List.Sum([YR]), Int64.Type}
+    })
+in
+    Summary
