@@ -1,0 +1,48 @@
+let
+    // connect to SQL Server and database
+    Source        = Sql.Databases("40.113.5.200"),
+    CustomDB      = Source{[Name="Reporting_Ford_Custom"]}[Data],
+    Raw           = CustomDB{[Schema="dbo",Item="Greg_Active_Pricing"]}[Data],
+
+    // filter by parameters
+    Filtered      = Table.SelectRows(Raw, each [Market]=Market and [Channel]=Channel),
+    Buffered      = Table.Buffer(Filtered),
+
+    // compute 1-year revenue
+    AddedRevenue  = Table.AddColumn(Buffered, "Revenue_1Y", each [SellingPrice] * [1y_Quantity], type number),
+
+    // sort descending by revenue and buffer the list
+    SortedRevenue = Table.Sort(AddedRevenue, {{"Revenue_1Y", Order.Descending}}),
+    RevList       = List.Buffer(SortedRevenue[Revenue_1Y]),
+    TotalRevenue  = List.Sum(RevList),
+
+    // cumulative revenue per row
+    AddedCum      = Table.AddColumn(
+                       SortedRevenue,
+                       "CumRevenue",
+                       each List.Sum(List.FirstN(RevList, List.PositionOf(RevList, [Revenue_1Y]) + 1)),
+                       type number
+                    ),
+
+    // cumulative percentage
+    AddedPct      = Table.AddColumn(AddedCum, "CumPct", each [CumRevenue] / TotalRevenue, type number),
+
+    // ABC classification: A = top ≤80%, B = next ≤15%, C = remainder
+    AddedABC      = Table.AddColumn(
+                       AddedPct,
+                       "ABC",
+                       each if [CumPct] <= 0.8 then "A"
+                            else if [CumPct] <= 0.95 then "B"
+                            else "C",
+                       type text
+                    ),
+
+    #"Reordered Columns" = Table.ReorderColumns(AddedABC,{"SKU", "SKU Title", "ABC", "ID_Market", "Market", "Channel", "Brand", "Top Category", "Parent Category", "Category", "isComposite", "SellingPrice", "Days at Price", "Present RRP", "Present Cost", "Present Markup", "Present Discount", "3m_Quantity", "6m_Quantity", "1y_Quantity", "2y_Quantity", "Future StartDate", "Future RRP", "Future Cost", "Revenue_1Y", "CumRevenue", "CumPct"}),
+    #"Duplicated Column" = Table.DuplicateColumn(#"Reordered Columns", "SKU", "SKU - Copy"),
+    #"Calculated Text Length" = Table.TransformColumns(#"Duplicated Column",{{"SKU - Copy", Text.Length, Int64.Type}}),
+    #"Renamed Columns" = Table.RenameColumns(#"Calculated Text Length",{{"SKU - Copy", "SKU Length"}}),
+    #"Removed Columns" = Table.RemoveColumns(#"Renamed Columns",{"ID_Market", "Revenue_1Y", "CumRevenue", "CumPct"}),
+    #"Removed Duplicates" = Table.Distinct(#"Removed Columns"),
+    #"Removed Other Columns" = Table.SelectColumns(#"Removed Duplicates",{"SKU", "ABC", "isComposite", "3m_Quantity", "6m_Quantity", "1y_Quantity", "2y_Quantity", "Future StartDate", "Future RRP", "Future Cost", "SellingPrice", "Days at Price", "Present RRP", "Present Cost", "Present Markup", "Present Discount"})
+in
+    #"Removed Other Columns"
