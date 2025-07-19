@@ -1,0 +1,134 @@
+let
+    // === OPTIMIZED FORECAST DATA FOR 30K+ SKUS ===
+    // Streamlined join with enhanced PromoROI and SeasonalityData
+    
+    // Start with optimized PromoROI base data
+    BaseData = PromoROI,
+    
+    // Efficient seasonality join
+    #"Joined Seasonality" = Table.NestedJoin(BaseData, {"SKU"}, SeasonalityData, {"SKU"}, "Seasonality", JoinKind.LeftOuter),
+    #"Expanded Seasonality" = Table.ExpandTableColumn(#"Joined Seasonality", "Seasonality", 
+        {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}),
+    
+    // Fill null seasonality with neutral factors
+    #"Filled Seasonality" = Table.TransformColumns(#"Expanded Seasonality", {
+        {"Jan", each if _ = null then 1.0 else _, type number},
+        {"Feb", each if _ = null then 1.0 else _, type number},
+        {"Mar", each if _ = null then 1.0 else _, type number},
+        {"Apr", each if _ = null then 1.0 else _, type number},
+        {"May", each if _ = null then 1.0 else _, type number},
+        {"Jun", each if _ = null then 1.0 else _, type number},
+        {"Jul", each if _ = null then 1.0 else _, type number},
+        {"Aug", each if _ = null then 1.0 else _, type number},
+        {"Sep", each if _ = null then 1.0 else _, type number},
+        {"Oct", each if _ = null then 1.0 else _, type number},
+        {"Nov", each if _ = null then 1.0 else _, type number},
+        {"Dec", each if _ = null then 1.0 else _, type number}
+    }),
+    
+    // Ensure all required columns exist with defaults
+    #"Ensure Columns" = let
+        currentTable = #"Filled Seasonality",
+        columnNames = Table.ColumnNames(currentTable),
+        
+        // Add missing columns with defaults if they don't exist
+        withSparseData = if List.Contains(columnNames, "SparseData") then currentTable 
+            else Table.AddColumn(currentTable, "SparseData", each false, type logical),
+            
+        withMonthsSince = if List.Contains(Table.ColumnNames(withSparseData), "MonthsSinceFirstSale") then withSparseData
+            else Table.AddColumn(withSparseData, "MonthsSinceFirstSale", each 1, type number),
+            
+        withTotalQty = if List.Contains(Table.ColumnNames(withMonthsSince), "TotalQtySold") then withMonthsSince
+            else Table.AddColumn(withMonthsSince, "TotalQtySold", each 0, type number)
+    in
+        withTotalQty,
+    
+    // Validate promo metrics and add defaults
+    #"Added Safe Defaults" = Table.TransformColumns(#"Ensure Columns", {
+        {"StrikeThroughLift", each if _ = null then 0.25 else _, type number},
+        {"CouponLift", each if _ = null then 0.20 else _, type number},
+        {"NonStrikeThroughLift", each if _ = null then 0.15 else _, type number},
+        {"RRPLift", each if _ = null then 0.10 else _, type number},
+        {"PriceElasticity", each if _ = null then 1.5 else _, type number},
+        {"BaselineQty", each if _ = null then 0.0 else _, type number},
+        {"BaselineRevenue", each if _ = null then 0.0 else _, type number},
+        {"BaselinePrice", each if _ = null then 0.0 else _, type number}
+    }),
+    
+    // Add current month context
+    #"Added CurrentMonth" = Table.AddColumn(#"Added Safe Defaults", "CurrentMonth", each Date.Month(DateTime.Date(DateTime.LocalNow())), Int64.Type),
+    
+    // FIXED: Optimized 12-month forecast generation with correct month mapping
+    #"Added Forecasts" = Table.AddColumn(#"Added CurrentMonth", "MonthlyForecasts", each
+        let
+            currentMonth = Date.Month(DateTime.Date(DateTime.LocalNow())),
+            monthNames = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"},
+            
+            // Get seasonality factors as a list (Jan=0, Feb=1, ..., Dec=11)
+            seasonalityList = {[Jan], [Feb], [Mar], [Apr], [May], [Jun], [Jul], [Aug], [Sep], [Oct], [Nov], [Dec]},
+            
+            // Generate 12 months of forecasts starting from current month
+            forecasts = List.Transform(List.Positions(seasonalityList), each
+                let
+                    // Correct month index calculation
+                    monthIndex = Number.Mod((currentMonth - 1) + _, 12),
+                    seasonalityFactor = seasonalityList{monthIndex}
+                in
+                    seasonalityFactor
+            )
+        in
+            forecasts
+    ),
+    
+    // Expand forecasts into individual month columns
+    #"Expanded Forecasts" = Table.TransformColumns(#"Added Forecasts", {
+        {"MonthlyForecasts", each 
+            [Month1 = _{0}, Month2 = _{1}, Month3 = _{2}, Month4 = _{3},
+             Month5 = _{4}, Month6 = _{5}, Month7 = _{6}, Month8 = _{7},
+             Month9 = _{8}, Month10 = _{9}, Month11 = _{10}, Month12 = _{11}], 
+            type record}
+    }),
+    
+    #"Expanded Month Columns" = Table.ExpandRecordColumn(#"Expanded Forecasts", "MonthlyForecasts", 
+        {"Month1", "Month2", "Month3", "Month4", "Month5", "Month6", 
+         "Month7", "Month8", "Month9", "Month10", "Month11", "Month12"}),
+    
+    // Add metadata
+    #"Added LastUpdated" = Table.AddColumn(#"Expanded Month Columns", "LastUpdated", each DateTime.LocalNow(), type datetime),
+    
+    // Final column selection - ALWAYS include all columns for VBA compatibility
+    #"Final Columns" = Table.SelectColumns(#"Added LastUpdated", {
+        "SKU", "Market", "Channel", "Brand", "SKUType",
+        "BaselineQty", "BaselineRevenue", "BaselinePrice", "QualityScore", "TotalDays",
+        "StrikeThroughLift", "CouponLift", "NonStrikeThroughLift", "RRPLift",
+        "BestPromoType", "PriceElasticity", "CurrentMonth",
+        "Month1", "Month2", "Month3", "Month4", "Month5", "Month6",
+        "Month7", "Month8", "Month9", "Month10", "Month11", "Month12", 
+        "SparseData", "MonthsSinceFirstSale", "TotalQtySold", "LastUpdated"
+    }),
+    
+    // Ensure proper column types for VBA
+    #"Final Types" = Table.TransformColumnTypes(#"Final Columns", {
+        {"BaselineQty", type number},
+        {"BaselinePrice", type number},
+        {"QualityScore", type number},
+        {"StrikeThroughLift", type number},
+        {"CouponLift", type number},
+        {"NonStrikeThroughLift", type number},
+        {"RRPLift", type number},
+        {"PriceElasticity", type number},
+        {"Month1", type number}, {"Month2", type number}, {"Month3", type number},
+        {"Month4", type number}, {"Month5", type number}, {"Month6", type number},
+        {"Month7", type number}, {"Month8", type number}, {"Month9", type number},
+        {"Month10", type number}, {"Month11", type number}, {"Month12", type number},
+        {"SparseData", type logical},
+        {"MonthsSinceFirstSale", type number},
+        {"TotalQtySold", type number}
+    }),
+    
+    // Final quality filter - include all valid SKUs
+    #"Filtered Valid SKUs" = Table.SelectRows(#"Final Types", each 
+        [SKU] <> null and [SKU] <> "")
+
+in
+    #"Filtered Valid SKUs"
