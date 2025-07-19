@@ -1,0 +1,101 @@
+BELOW FIND MY SOURCE AND THE COULMN REFERENCES. Each source sperate by "NEXT". THis give you the source name and then 1 row of data as an example so you can see the format and Coulmn names. 
+
+NEXT
+
+
+Source        = Sql.Databases("40.113.5.200"),
+    CustomDB      = Source{[Name="Reporting_Ford_Custom"]}[Data],
+    Raw           = CustomDB{[Schema="dbo",Item="Greg_Active_Pricing"]}[Data],
+
+SKU	SKU Title	ID_Market	Market	Channel	Brand	Top Category	Parent Category	Category	isComposite	SellingPrice	Days at Price	Present RRP	Present Cost	Present Markup	Present Discount	3m_Quantity	6m_Quantity	1y_Quantity	2y_Quantity	Future StartDate	Future RRP	Future Cost
+1000530 x10	Genuine Ford Insulators And Covers Plastic Rivet x10 1000530	1	UK	Webstore	Ford	Parts	CHASSIS PARTS	22: FASTENERS HARDWARE PARTS	1	20	260	19.7	13.8	0.45	-0.02	null	null	null	null	null	null	null
+
+NEXT
+
+    Source = Sql.Databases("40.113.5.200"),
+    Reporting_Ford_Custom = Source{[Name="Reporting_Ford_Custom"]}[Data],
+    dbo_Greg_all_prices_temp = Reporting_Ford_Custom{[Schema="dbo",Item="Greg_all_prices_temp"]}[Data],
+
+Market	Channel	SKU	MLICode	ListingStatus	Title	MLIName	Prev_SellingPrice	Prev_Days_at_Price	Sales	Quantity	Quantity_at_discount	Discount	Discount_pc	Sales_per_day	Quantity_per_day	Markup_pc	SellingPrice	DealerNet	RRP	SellStartDate	Days_at_price	Ford Price From
+UK	Webstore	5337660 x5	22	1	INSULATORS FRONT RETAINER PACK OF 5	FASTENERS HARDWARE PARTS	null	null	900	45	null	0	null	2.168674	0.108433735	0.552518068	20	13.02	18.6	30/05/2024	415	01/07/2025
+
+
+NEXT
+
+let
+    // 1. Load all CSV files
+    Source      = Folder.Files("C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto"),
+    CsvFiles    = Table.SelectRows(Source, each [Extension] = ".csv"),
+
+    // 2. Extract Market, Channel, Brand & SKUType from folder structure
+    WithCat     = Table.AddColumn(CsvFiles, "MarketChannelBrandSKUType", each 
+                    let
+                        fullPath = [Folder Path],
+                        afterRoot = Text.AfterDelimiter(fullPath, "12_PricingAuto\"),
+                        pathParts = Text.Split(afterRoot, "\"),
+                        market = if List.Count(pathParts) >= 1 then pathParts{0} else null,
+                        channel = if List.Count(pathParts) >= 2 then pathParts{1} else null,
+                        brand = if List.Count(pathParts) >= 3 then pathParts{2} else null,
+                        skutype = if List.Count(pathParts) >= 4 then pathParts{3} else null
+                    in
+                        [Market = market, Channel = channel, Brand = brand, SKUType = skutype]),
+    SplitCat    = Table.ExpandRecordColumn(WithCat, "MarketChannelBrandSKUType", {"Market", "Channel", "Brand", "SKUType"}),
+
+Content	Name	Extension	Date accessed	Date modified	Date created	Attributes	Folder Path	Market	Channel	Brand	SKUType	SKU	_Market	_Channel	_Brand	_SKUType	DiscountType	DiscountAmt	StartDate	EndDate	RRPMaster	SellPriceMaster
+Binary.FromText(...)	UK_Webstore_Ford_Single_2025-06.csv	.csv	19/07/2025 22:01:44	25/06/2025 09:45:22	25/06/2025 09:45:21	[Record]	C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto\UK\Webstore\Ford\Single\	UK	Webstore	Ford	Single	L15F8D6	UK	Webstore	Ford	Single	Coupon	0.35	2025-06-01	2025-06-16	56.75	56.75
+
+
+
+NEXT
+
+
+    RootPath       = "C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto\",
+
+Content	Name	Extension	Date accessed	Date modified	Date created	Attributes	Folder Path	Market	Channel	Brand	SKUType	SKU	_Market	_Channel	_Brand	_SKUType	DiscountType	DiscountAmt	StartDate	EndDate	RRPMaster	SellPriceMaster
+Binary.FromText(...)	UK_Webstore_Ford_Single_2025-06.csv	.csv	19/07/2025 22:01:44	25/06/2025 09:45:22	25/06/2025 09:45:21	[Record]	C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto\UK\Webstore\Ford\Single\	UK	Webstore	Ford	Single	L15F8D6	UK	Webstore	Ford	Single	Coupon	0.35	2025-06-01	2025-06-16	56.75	56.75
+
+
+
+NEXT
+
+let
+    // connect to SQL Server and database
+    Source        = Sql.Databases("40.113.5.200"),
+    // connect to SQL Server and database
+    Reporting_Ford = Source{[Name="Reporting_Ford"]}[Data],
+    // connect to SQL Server and database
+    dbo_Markets = Reporting_Ford{[Schema="dbo",Item="Markets"]}[Data]
+
+ID_Market	LW_DB	Source	SubSource	Channel	Market	Brand	Currency	Launch	Drive	Active
+21	frford	AMAZON	amazon-fr@shop-ford.com	Amazon	FR	Ford	EUR	01/01/2024	LHD	null
+
+
+NEXT
+
+let
+    // SQL connection
+    Source              = Sql.Databases("40.113.5.200"),
+    Stock_Ford          = Source{[Name="Stock_Ford"]}[Data],
+    dbo_PBi_OOS_Periods = Stock_Ford{[Schema="dbo", Item="PBi_OOS_Periods"]}[Data],
+
+ID_Market	StockID	SKU	StartOOS	EndOOS	DaysOOS	id_market_idx	Currency	LocalDSR	DSRDays
+1	1	1085520	02/04/2025	02/05/2025	31	1_174737	GBP	0	60
+
+
+NEXT
+
+    // === OPTIMIZED PROMO ROI ANALYSIS ===
+    Source = Sql.Databases("40.113.5.200"),
+    Reporting_Ford = Source{[Name="Reporting_Ford"]}[Data],
+    dbo_Items = Reporting_Ford{[Schema="dbo",Item="Items"]}[Data],
+
+
+ID_Market	rowid	ReceivedDate	Linnworks ID	Store Order ID	Currency	SKU	Quantity	LineTotalExTax	LineTotalIncTax	UnitPriceExTax	UnitPriceIncTax	LineTax	UnitTax	LineDiscountExTax	LineDiscountIncTax	UnitCost	ContainsComposites	ItemLocation	fkCustomer	fkSKU	fkOrder	Item has RMA	LWDB
+1	3AD20F0B-2251-4ECE-BA76-53798F1B1535	09/01/2023	218562	118047	GBP	1772281	1	13.47	16.16	13.47	16.16	2.69	2.69	null	null	12.12	FALSE	Default	26026	14645	185181	null	ukford
+
+NEXT
+
+
+
+
+
