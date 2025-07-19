@@ -1,0 +1,9 @@
+let
+    // connect to SQL Server and database
+    Source        = Sql.Databases("40.113.5.200"),
+    // connect to SQL Server and database
+    Reporting_Ford = Source{[Name="Reporting_Ford"]}[Data],
+    // connect to SQL Server and database
+    dbo_Markets = Reporting_Ford{[Schema="dbo",Item="Markets"]}[Data]
+in
+    dbo_Markets
