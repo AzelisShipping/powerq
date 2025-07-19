@@ -1,0 +1,122 @@
+Sub PopulateFromAllSKUTable_Fast()
+    Dim wsMaster As Worksheet, wsDatabase As Worksheet
+    Dim tblAllSKU As ListObject
+    Dim masterData As Variant, allSKUData As Variant, headerData As Variant
+    Dim dictLookup As Object, dictHeaders As Object
+    Dim i As Long, j As Long, lastRow As Long, lastCol As Long
+    Dim excludeCols As Variant
+    Dim hasFilters As Boolean, filterRange As Range
+    
+    ' Setup
+    Set wsMaster = ActiveSheet
+    Set wsDatabase = Sheets("Database")
+    Set tblAllSKU = wsDatabase.ListObjects("All_SKU")
+    Set dictLookup = CreateObject("Scripting.Dictionary")
+    Set dictHeaders = CreateObject("Scripting.Dictionary")
+    
+    ' Check if filters are applied and temporarily remove them
+    If wsMaster.AutoFilterMode Then
+        hasFilters = True
+        Set filterRange = wsMaster.AutoFilter.Range
+        wsMaster.AutoFilterMode = False
+    End If
+    
+    ' Columns to exclude
+    excludeCols = Array("Market", "Channel", "SKU", "MLICode")
+    
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Loading data from All_SKU table..."
+    
+    ' Load data into arrays
+    allSKUData = tblAllSKU.DataBodyRange.Value
+    lastRow = wsMaster.Cells(wsMaster.Rows.Count, 5).End(xlUp).row
+    lastCol = wsMaster.Cells(9, wsMaster.Columns.Count).End(xlToLeft).Column
+    masterData = wsMaster.Range("A10").Resize(lastRow - 9, lastCol).Value
+    headerData = wsMaster.Range("A9").Resize(1, lastCol).Value
+    
+    Application.StatusBar = "Building lookup tables..."
+    
+    ' Build header dictionary for Master sheet (row 9)
+    For i = 1 To UBound(headerData, 2)
+        If Trim(headerData(1, i)) <> "" Then
+            dictHeaders(Trim(headerData(1, i))) = i
+        End If
+    Next i
+    
+    ' Build SKU lookup dictionary from All_SKU table
+    Dim skuColIndex As Long
+    For j = 1 To tblAllSKU.ListColumns.Count
+        If tblAllSKU.ListColumns(j).Name = "SKU" Then
+            skuColIndex = j
+            Exit For
+        End If
+    Next j
+    
+    For i = 1 To UBound(allSKUData, 1)
+        Dim skuKey As String
+        skuKey = Trim(CStr(allSKUData(i, skuColIndex)))  ' Force to string
+        If skuKey <> "" Then
+            dictLookup(skuKey) = i
+        End If
+    Next i
+    
+    Application.StatusBar = "Updating SKU data..."
+    
+    ' Update master data array - THIS REFRESHES/OVERWRITES EXISTING DATA
+    Dim updatedCount As Long
+    For i = 1 To UBound(masterData, 1)
+        Dim masterSKU As String
+        masterSKU = Trim(CStr(masterData(i, 5)))  ' Force to string - SKU in column E (5th column)
+        
+        If masterSKU <> "" And dictLookup.Exists(masterSKU) Then
+            Dim sourceRowIndex As Long
+            sourceRowIndex = dictLookup(masterSKU)
+            updatedCount = updatedCount + 1
+            
+            ' Copy each column from All_SKU to Master
+            For j = 1 To tblAllSKU.ListColumns.Count
+                Dim allSKUColName As String
+                allSKUColName = tblAllSKU.ListColumns(j).Name
+                
+                ' Skip excluded columns
+                If Not IsInArray(allSKUColName, excludeCols) Then
+                    ' Find matching column in Master sheet
+                    If dictHeaders.Exists(allSKUColName) Then
+                        Dim masterColIndex As Long
+                        masterColIndex = dictHeaders(allSKUColName)
+                        masterData(i, masterColIndex) = allSKUData(sourceRowIndex, j)
+                    End If
+                End If
+            Next j
+        End If
+    Next i
+    
+    Application.StatusBar = "Writing data to sheet..."
+    
+    ' Write back to Master sheet (overwrites existing data)
+    wsMaster.Range("A10").Resize(UBound(masterData, 1), UBound(masterData, 2)).Value = masterData
+    
+    ' Restore filters if they were applied
+    If hasFilters Then
+        filterRange.AutoFilter
+    End If
+    
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    
+    MsgBox "REFRESHED " & updatedCount & " SKUs with latest data from All_SKU table" & vbCrLf & _
+           "Total rows processed: " & (lastRow - 9), vbInformation
+End Sub
+
+' Helper function
+Function IsInArray(valToBeFound As Variant, arr As Variant) As Boolean
+    Dim i As Long
+    For i = 0 To UBound(arr) - LBound(arr)
+        If arr(i) = valToBeFound Then
+            IsInArray = True
+            Exit Function
+        End If
+    Next i
+    IsInArray = False
+End Function
+
