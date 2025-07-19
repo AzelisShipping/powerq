@@ -1,391 +1,201 @@
-Sub SetupPricingRulesSheet()
-    Dim ws As Worksheet
+Option Explicit
+
+Const ROOT_PATH As String = _
+    "C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto\"
+
+Sub SaveMasterRowsToCSV()
+
+    Dim ws As Worksheet: Set ws = Sheets("Master")
+    Dim H As Object: Set H = CreateObject("Scripting.Dictionary")
+    Dim c As Long, lastCol As Long, lastR As Long
     
-    ' Delete existing sheet if it exists
-    On Error Resume Next
-    Application.DisplayAlerts = False
-    ThisWorkbook.Worksheets("PricingRules").Delete
-    Application.DisplayAlerts = True
-    On Error GoTo 0
+    '------------------------------------
+    '-- build header dictionary (row 9) --
+    lastCol = ws.Cells(9, ws.Columns.Count).End(xlToLeft).Column
+    lastR = ws.Cells(ws.Rows.Count, 5).End(xlUp).row  ' Assume SKU in column E
     
-    ' Create new sheet
-    Set ws = ThisWorkbook.Worksheets.Add
-    ws.Name = "PricingRules"
+    For c = 1 To lastCol
+        If Len(ws.Cells(9, c).Value) > 0 Then _
+            H(Trim(ws.Cells(9, c).Value)) = c
+    Next c
     
-    Application.ScreenUpdating = False
+    ' Check for required headers
+    If Not H.Exists("Market") Or Not H.Exists("Channel") Or Not H.Exists("SKU") Or Not H.Exists("Brand") Or Not H.Exists("SKUType") Then
+        MsgBox "Missing required headers: Market, Channel, SKU, Brand, or SKUType", vbCritical
+        Exit Sub
+    End If
     
-    With ws
-        ' Clear everything first
-        .Cells.Clear
-        
-        ' === TITLE SECTION ===
-        .Range("A1").Value = "PRICING RULES MANAGEMENT"
-        .Range("A1").Font.Bold = True
-        .Range("A1").Font.Size = 16
-        .Range("A1").Interior.color = RGB(0, 102, 204)
-        .Range("A1").Font.color = RGB(255, 255, 255)
-        .Range("A1:N1").Merge
-        .Range("A1").HorizontalAlignment = xlCenter
-        
-        ' === INSTRUCTIONS ===
-        .Range("A2").Value = "INSTRUCTIONS: Fill in rows 5+ with your pricing rules. Use dropdowns in columns C & D. Priority 1 = highest."
-        .Range("A2:N2").Merge
-        .Range("A2").WrapText = True
-        .Range("A2").Interior.color = RGB(255, 255, 200)
-        .Range("A2").Font.Bold = True
-        .Range("A2").RowHeight = 30
-        
-        ' === COMPOUND RULE INSTRUCTIONS ===
-        .Range("A3").Value = "For COMPOUND rules use format: MARKET:UK,DE|CHANNEL:eBay,Amazon|MLI:517,518"
-        .Range("A3:N3").Merge
-        .Range("A3").Font.Size = 10
-        .Range("A3").Font.Italic = True
-        
-        ' === HEADERS ROW 4 ===
-        .Range("A4").Value = "Active"
-        .Range("B4").Value = "Rule Name"
-        .Range("C4").Value = "Rule Type"
-        .Range("D4").Value = "Scope"
-        .Range("E4").Value = "Scope Values"
-        .Range("F4").Value = "Value"
-        .Range("G4").Value = "Valid From"
-        .Range("H4").Value = "Valid To"
-        .Range("I4").Value = "Priority"
-        .Range("J4").Value = "Market Filter"
-        .Range("K4").Value = "Channel Filter"
-        .Range("L4").Value = "MLI Filter"
-        .Range("M4").Value = "SKU Filter"
-        .Range("N4").Value = "Notes"
-        
-        ' Format headers - make them VERY visible
-        With .Range("A4:N4")
-            .Font.Bold = True
-            .Font.Size = 12
-            .Interior.color = RGB(0, 102, 204)
-            .Font.color = RGB(255, 255, 255)
-            .Borders.LineStyle = xlContinuous
-            .Borders.Weight = xlThick
-            .HorizontalAlignment = xlCenter
-            .RowHeight = 25
-        End With
-        
-        ' === COLUMN WIDTHS ===
-        .Columns("A").ColumnWidth = 8
-        .Columns("B").ColumnWidth = 25
-        .Columns("C").ColumnWidth = 18
-        .Columns("D").ColumnWidth = 12
-        .Columns("E").ColumnWidth = 30
-        .Columns("F").ColumnWidth = 10
-        .Columns("G:H").ColumnWidth = 12
-        .Columns("I").ColumnWidth = 8
-        .Columns("J:M").ColumnWidth = 15
-        .Columns("N").ColumnWidth = 30
-        
-        ' === SAMPLE DATA STARTING ROW 5 ===
-        Dim row As Long: row = 5
-        
-        ' Rule 1: UK BDN +10%
-        .Cells(row, 1).Value = "TRUE"
-        .Cells(row, 2).Value = "UK BDN +10% Minimum"
-        .Cells(row, 3).Value = "minimum_markup"
-        .Cells(row, 4).Value = "MARKET"
-        .Cells(row, 5).Value = "UK"
-        .Cells(row, 6).Value = 10
-        .Cells(row, 7).Value = Date
-        .Cells(row, 9).Value = 1
-        .Cells(row, 10).Value = "UK"
-        .Cells(row, 14).Value = "Legal requirement - 10% markup on BDN"
-        row = row + 1
-        
-        ' Rule 2: 50% Promo Balance
-        .Cells(row, 1).Value = "TRUE"
-        .Cells(row, 2).Value = "50% Promo Balance Rule"
-        .Cells(row, 3).Value = "promo_balance"
-        .Cells(row, 4).Value = "ALL"
-        .Cells(row, 5).Value = "ALL"
-        .Cells(row, 6).Value = 50
-        .Cells(row, 7).Value = Date
-        .Cells(row, 9).Value = 2
-        .Cells(row, 14).Value = "Max 50% of time on promo"
-        row = row + 1
-        
-        ' Rule 3: No discount on A items
-        .Cells(row, 1).Value = "TRUE"
-        .Cells(row, 2).Value = "No Discount on A Items"
-        .Cells(row, 3).Value = "no_discount"
-        .Cells(row, 4).Value = "ABC"
-        .Cells(row, 5).Value = "A"
-        .Cells(row, 6).Value = 0
-        .Cells(row, 7).Value = Date
-        .Cells(row, 9).Value = 3
-        .Cells(row, 14).Value = "Protect margin on high-value items"
-        row = row + 1
-        
-        ' Rule 4: Max 30% discount example
-        .Cells(row, 1).Value = "TRUE"
-        .Cells(row, 2).Value = "Max 30% Discount on B Items"
-        .Cells(row, 3).Value = "maximum_discount"
-        .Cells(row, 4).Value = "ABC"
-        .Cells(row, 5).Value = "B"
-        .Cells(row, 6).Value = 30
-        .Cells(row, 7).Value = Date
-        .Cells(row, 9).Value = 4
-        .Cells(row, 14).Value = "Limit discount depth on B items"
-        row = row + 1
-        
-        ' Compound rule example
-        .Cells(row, 1).Value = "TRUE"
-        .Cells(row, 2).Value = "UK eBay/Amazon Floor £4.99"
-        .Cells(row, 3).Value = "floor_price"
-        .Cells(row, 4).Value = "COMPOUND"
-        .Cells(row, 5).Value = "MARKET:UK|CHANNEL:eBay,Amazon"
-        .Cells(row, 6).Value = 4.99
-        .Cells(row, 7).Value = Date
-        .Cells(row, 9).Value = 5
-        .Cells(row, 14).Value = "Floor price for UK marketplaces"
-        row = row + 1
-        
-        ' === ADD DROPDOWNS ===
-        ' Rule Type dropdown
-        With .Range("C5:C1000").Validation
-            .Delete
-            .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, _
-                 Formula1:="minimum_markup,maximum_discount,floor_price,ceiling_price,no_discount,promo_balance"
-            .IgnoreBlank = True
-            .InCellDropdown = True
-        End With
-        
-        ' Scope dropdown
-        With .Range("D5:D1000").Validation
-            .Delete
-            .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, _
-                 Formula1:="ALL,MARKET,CHANNEL,MLI,SKU,ABC,COMPOUND"
-            .IgnoreBlank = True
-            .InCellDropdown = True
-        End With
-        
-        ' Active dropdown
-        With .Range("A5:A1000").Validation
-            .Delete
-            .Add Type:=xlValidateList, Formula1:="TRUE,FALSE"
-            .InCellDropdown = True
-        End With
-        
-        ' Format date columns
-        .Range("G5:H1000").NumberFormat = "dd/mm/yyyy"
-        
-        ' Color the sample data
-        .Range("A5:N9").Interior.color = RGB(240, 248, 255)
-        
-        ' Add a separator row
-        row = row + 1
-        .Cells(row, 1).Value = "--- ADD YOUR RULES BELOW ---"
-        .Range(.Cells(row, 1), .Cells(row, 14)).Merge
-        .Cells(row, 1).Font.Bold = True
-        .Cells(row, 1).Interior.color = RGB(255, 255, 0)
-        .Cells(row, 1).HorizontalAlignment = xlCenter
-        
-        ' Make sure we're on the right sheet and cell A1 is selected
-        .Activate
-        .Range("A1").Select
-        
-        ' Freeze panes at row 5 (after headers)
-        .Range("A5").Select
-        ActiveWindow.FreezePanes = True
-        
-        ' Go back to A1
-        .Range("A1").Select
-    End With
+    '------------------------------------
+    '-- find highest Promo slot number --
+    Dim maxSlot As Long, hd As Variant
     
-    Application.ScreenUpdating = True
+    For Each hd In H.Keys
+        If UCase(Left(hd, 9)) = "PROMOTYPE" Then
+            maxSlot = Application.Max(maxSlot, Val(Mid(hd, 10)))
+        End If
+    Next hd
     
-    ' Show completion message
-    MsgBox "Pricing Rules sheet created!" & vbCrLf & vbCrLf & _
-           "Headers are in row 4:" & vbCrLf & _
-           "• Column A: Active (TRUE/FALSE)" & vbCrLf & _
-           "• Column B: Rule Name" & vbCrLf & _
-           "• Column C: Rule Type (use dropdown)" & vbCrLf & _
-           "• Column D: Scope (use dropdown)" & vbCrLf & _
-           "• Column E: Scope Values" & vbCrLf & _
-           "• Column F: Value (number)" & vbCrLf & vbCrLf & _
-           "Sample rules are in rows 5-8. Add your rules below row 9.", vbInformation
+    '------------------------------------
+    '-- read all data into arrays for speed --
+    Dim dataRange As Range
+    Set dataRange = ws.Range(ws.Cells(10, 1), ws.Cells(lastR, lastCol))
+    Dim dataArray As Variant
+    dataArray = dataRange.Value
+    
+    '------------------------------------
+    '-- gather rows into dictionary --
+    Dim rowsDict As Object: Set rowsDict = CreateObject("Scripting.Dictionary")
+    Dim r As Long
+    
+    For r = 1 To UBound(dataArray, 1)
+        
+        Dim sku As String: sku = Trim(CStr(dataArray(r, H("SKU"))))
+        If sku = "" Then GoTo nextRow
+        
+        Dim mkt As String: mkt = Trim(CStr(dataArray(r, H("Market"))))
+        Dim ch As String: ch = Trim(CStr(dataArray(r, H("Channel"))))
+        Dim brd As String: brd = Trim(CStr(dataArray(r, H("Brand"))))
+        Dim skutype As String: skutype = Trim(CStr(dataArray(r, H("SKUType"))))
+        
+        ' Skip rows with blank required fields
+        If mkt = "" Or ch = "" Or brd = "" Or skutype = "" Then GoTo nextRow
+        
+        ' Process promo data
+        Dim i As Long
+        For i = 1 To maxSlot
+            
+            Dim keyType As String: keyType = "PromoType" & i
+            Dim keyStart As String: keyStart = "PromoStart" & i
+            Dim keyEnd As String: keyEnd = "PromoEnd" & i
+            Dim keyVal As String: keyVal = "PromoValue" & i
+            Dim keyRRP As String: keyRRP = "RRPMaster" & i
+            Dim keySell As String: keySell = "SellPriceMaster" & i
+            
+            If H.Exists(keyType) And H.Exists(keyStart) And H.Exists(keyEnd) And H.Exists(keyVal) Then
+               
+                Dim pType As String: pType = CStr(dataArray(r, H(keyType)))
+                Dim sDt As Variant: sDt = dataArray(r, H(keyStart))
+                Dim eDt As Variant: eDt = dataArray(r, H(keyEnd))
+                Dim pVal As String: pVal = CStr(dataArray(r, H(keyVal)))
+                
+                ' Get corresponding pricing data for this slot
+                Dim rrpMaster As String: rrpMaster = "0"
+                Dim sellPriceMaster As String: sellPriceMaster = "0"
+                
+                If H.Exists(keyRRP) Then
+                    Dim rrpVal As Variant: rrpVal = dataArray(r, H(keyRRP))
+                    If IsNumeric(rrpVal) And rrpVal <> "" Then rrpMaster = CStr(rrpVal)
+                End If
+                
+                If H.Exists(keySell) Then
+                    Dim sellVal As Variant: sellVal = dataArray(r, H(keySell))
+                    If IsNumeric(sellVal) And sellVal <> "" Then sellPriceMaster = CStr(sellVal)
+                End If
+                
+                ' Only process if we have valid promo data
+                If Len(Trim(pType)) > 0 And IsDate(sDt) And IsDate(eDt) Then
+                    If Trim(pVal) = "" Then pVal = "0"
+                    
+                    Dim dS As Date, dE As Date
+                    dS = CDate(sDt): dE = CDate(eDt)
+                    If dS >= #1/1/2000# And dE >= #1/1/2000# Then
+                        
+                        ' NEW: Handle split-month promos
+                        Dim startMonth As Date: startMonth = DateSerial(Year(dS), Month(dS), 1)
+                        Dim endMonth As Date: endMonth = DateSerial(Year(dE), Month(dE), 1)
+                        
+                        ' Write to each affected month
+                        Dim currentMonth As Date
+                        For currentMonth = startMonth To endMonth Step 31
+                            Dim ym As String: ym = Format(currentMonth, "yyyy-mm")
+                            Dim dictKey As String: dictKey = mkt & "|" & ch & "|" & brd & "|" & skutype & "|" & ym
+                            
+                            If Not rowsDict.Exists(dictKey) Then _
+                                Set rowsDict(dictKey) = CreateObject("Scripting.Dictionary")
+                            
+                            ' Use full date range but unique key per month
+                            Dim promoLineKey As String: promoLineKey = sku & "_" & Format(dS, "yyyy-mm-dd") & "_" & Format(dE, "yyyy-mm-dd") & "_" & pType & "_" & i
+                            If Not rowsDict(dictKey).Exists(promoLineKey) Then
+                                rowsDict(dictKey).Add promoLineKey, _
+                                    sku & "," & mkt & "," & ch & "," & brd & "," & skutype & "," & _
+                                    pType & "," & pVal & "," & _
+                                    Format(dS, "yyyy-mm-dd") & "," & _
+                                    Format(dE, "yyyy-mm-dd") & "," & _
+                                    rrpMaster & "," & sellPriceMaster
+                            End If
+                            
+                            ' Move to next month
+                            currentMonth = DateAdd("m", 1, currentMonth)
+                            If currentMonth > endMonth Then Exit For
+                        Next currentMonth
+                    End If
+                End If
+            End If
+        Next i
+        
+nextRow:
+    Next r
+    
+    '------------------------------------
+    '-- write CSV files --
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim key As Variant
+    
+    For Each key In rowsDict.Keys
+        Dim parts As Variant: parts = Split(key, "|")
+        Dim mktKey As String: mktKey = parts(0)
+        Dim chKey As String: chKey = parts(1)
+        Dim brdKey As String: brdKey = parts(2)
+        Dim skutypeKey As String: skutypeKey = parts(3)
+        Dim ymKey As String: ymKey = parts(4)
+        
+        ' Create folder structure efficiently
+        Dim folder As String: folder = ROOT_PATH & mktKey & "\" & chKey & "\" & brdKey & "\" & skutypeKey & "\"
+        CreateFolderPath folder
+        
+        Dim fp As String: fp = folder & mktKey & "_" & chKey & "_" & brdKey & "_" & skutypeKey & "_" & ymKey & ".csv"
+        Dim ts As Object: Set ts = fso.CreateTextFile(fp, True)
+        
+        ts.Write "SKU,Market,Channel,Brand,SKUType,DiscountType,DiscountAmt,StartDate,EndDate,RRPMaster,SellPriceMaster"
+        
+        Dim outputLineKey As Variant
+        For Each outputLineKey In rowsDict(key).Keys
+            ts.Write vbCrLf & rowsDict(key)(outputLineKey)
+        Next outputLineKey
+        ts.Close
+    Next key
+    
+    MsgBox "Pricing and promo data saved successfully to " & ROOT_PATH, vbInformation
+    
 End Sub
 
-Function ApplyPricingRules(sku As String, mli As String, abc As String, market As String, channel As String, rrp As Double, bdn As Double) As Variant
-    ' Apply all active pricing rules and return constraints
-    ' Returns: Array(MinPrice, MaxPrice, MaxDiscountPct, CanDiscount, AppliedRules)
-    
-    ' DEBUG - Remove after testing
-    Debug.Print "Testing SKU: " & sku & ", MLI: " & mli & ", ABC: " & abc
-    Debug.Print "Market: " & market & ", Channel: " & channel
-    Debug.Print "RRP: " & rrp & ", BDN: " & bdn
-    
-    ' Initialize with absolute minimums
-    Dim minPrice As Double: minPrice = 0
-    Dim maxPrice As Double: maxPrice = 999999
-    Dim maxDiscountPct As Double: maxDiscountPct = 100
-    Dim canDiscount As Boolean: canDiscount = True
-    Dim appliedRules As String: appliedRules = ""
-    
-    On Error Resume Next
-    Dim rulesWs As Worksheet: Set rulesWs = ThisWorkbook.Worksheets("PricingRules")
-    If rulesWs Is Nothing Then
-        ApplyPricingRules = Array(bdn * 1.1, rrp, 50, True, "Default: BDN+10%")
-        Exit Function
-    End If
-    On Error GoTo 0
-    
-    ' Find last row with data
-    Dim lastRow As Long: lastRow = rulesWs.Cells(rulesWs.Rows.Count, 1).End(xlUp).row
-    If lastRow < 5 Then
-        ApplyPricingRules = Array(bdn * 1.1, rrp, 50, True, "Default: BDN+10%")
-        Exit Function
-    End If
-    
-    ' Process rules by priority (sort by priority first)
-    Dim row As Long
-    For row = 5 To lastRow
-        ' Skip empty rows or inactive rules
-        If Trim(rulesWs.Cells(row, 1).Value) = "" Then GoTo nextRow
-        If UCase(Trim(rulesWs.Cells(row, 1).Value)) <> "TRUE" Then GoTo nextRow
-        
-        Dim ruleType As String: ruleType = LCase(Trim(rulesWs.Cells(row, 3).Value))
-        Dim scope As String: scope = UCase(Trim(rulesWs.Cells(row, 4).Value))
-        Dim scopeValues As String: scopeValues = Trim(rulesWs.Cells(row, 5).Value)
-        Dim ruleValue As Double: ruleValue = Val(rulesWs.Cells(row, 6).Value)
-        Dim ruleName As String: ruleName = Trim(rulesWs.Cells(row, 2).Value)
-        
-        ' Check if rule applies
-        Dim ruleApplies As Boolean: ruleApplies = False
-        
-        Select Case scope
-            Case "ALL"
-                ruleApplies = True
-            Case "MARKET"
-                ruleApplies = (UCase(market) = UCase(scopeValues))
-            Case "CHANNEL"
-                ruleApplies = (UCase(channel) = UCase(scopeValues))
-            Case "MLI"
-                ' FIXED: Proper MLI comparison
-                ruleApplies = (Trim(CStr(mli)) = Trim(CStr(scopeValues)))
-            Case "SKU"
-                ruleApplies = (UCase(sku) = UCase(scopeValues))
-            Case "ABC"
-                ruleApplies = (UCase(abc) = UCase(scopeValues))
-            Case "COMPOUND"
-                ruleApplies = CheckCompoundScope(scopeValues, market, channel, mli, sku, abc)
-        End Select
-        
-        ' Apply the rule if it matches
-        If ruleApplies Then
-            Select Case ruleType
-                Case "minimum_markup"
-                    If bdn > 0 Then
-                        Dim calculatedMin As Double: calculatedMin = bdn * (1 + ruleValue / 100)
-                        If calculatedMin > minPrice Then
-                            minPrice = calculatedMin
-                            appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-                        End If
-                    End If
-                    
-                Case "maximum_discount"
-                    If ruleValue < maxDiscountPct Then
-                        maxDiscountPct = ruleValue
-                        appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-                    End If
-                    
-                Case "floor_price"
-                    If ruleValue > minPrice Then
-                        minPrice = ruleValue
-                        appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-                    End If
-                    
-                Case "ceiling_price"
-                    If ruleValue < maxPrice Then
-                        maxPrice = ruleValue
-                        appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-                    End If
-                    
-                Case "no_discount"
-                    canDiscount = False
-                    maxDiscountPct = 0
-                    minPrice = rrp
-                    appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-                    
-                Case "promo_balance"
-                    ' This affects compliance checking
-                    appliedRules = appliedRules & IIf(appliedRules = "", "", ", ") & ruleName
-            End Select
-        End If
-nextRow:
-    Next row
-    
-    ' Final logic checks
-    If maxPrice < minPrice Then maxPrice = minPrice
-    
-    ' If no rules applied, show that
-    If appliedRules = "" Then appliedRules = "No rules applied"
-    
-    ' Return results
-    ApplyPricingRules = Array(minPrice, maxPrice, maxDiscountPct, canDiscount, appliedRules)
-End Function
-
-Function CheckCompoundScope(scopeValues As String, market As String, channel As String, mli As String, sku As String, abc As String) As Boolean
-    ' Check compound scope criteria
-    ' Format: MARKET:UK,DE|CHANNEL:eBay,Amazon|MLI:517,518
-    
-    Dim criteria() As String
-    criteria = Split(scopeValues, "|")
-    
-    Dim allMatch As Boolean: allMatch = True
+Private Sub CreateFolderPath(folderPath As String)
+    Dim parts As Variant: parts = Split(folderPath, "\")
+    Dim currentPath As String
     Dim i As Long
     
-    For i = 0 To UBound(criteria)
-        Dim parts() As String: parts = Split(criteria(i), ":")
-        If UBound(parts) = 1 Then
-            Dim criteriaType As String: criteriaType = UCase(Trim(parts(0)))
-            Dim criteriaValues As String: criteriaValues = UCase(Trim(parts(1)))
-            Dim currentMatch As Boolean: currentMatch = False
-            
-            Select Case criteriaType
-                Case "MARKET"
-                    currentMatch = InStr(criteriaValues, UCase(market)) > 0
-                Case "CHANNEL"
-                    currentMatch = InStr(criteriaValues, UCase(channel)) > 0
-                Case "MLI"
-                    currentMatch = InStr(criteriaValues, UCase(mli)) > 0
-                Case "SKU"
-                    currentMatch = InStr(criteriaValues, UCase(sku)) > 0
-                Case "ABC"
-                    currentMatch = InStr(criteriaValues, UCase(abc)) > 0
-            End Select
-            
-            If Not currentMatch Then
-                allMatch = False
-                Exit For
-            End If
+    For i = 0 To UBound(parts) - 1
+        currentPath = currentPath & parts(i) & "\"
+        If Dir(currentPath, vbDirectory) = "" And currentPath <> "" Then
+            MkDir currentPath
         End If
     Next i
-    
-    CheckCompoundScope = allMatch
-End Function
-
-Sub TestRulesForSKU()
-    Dim testSKU As String: testSKU = InputBox("Enter SKU to test:")
-    Dim testMLI As String: testMLI = InputBox("Enter MLI:")
-    Dim testABC As String: testABC = InputBox("Enter ABC:")
-    Dim testMarket As String: testMarket = InputBox("Enter Market (UK/DE/etc):")
-    Dim testChannel As String: testChannel = InputBox("Enter Channel:")
-    Dim testRRP As Double: testRRP = Val(InputBox("Enter RRP:"))
-    Dim testBDN As Double: testBDN = Val(InputBox("Enter BDN:"))
-    
-    Dim results As Variant
-    results = ApplyPricingRules(testSKU, testMLI, testABC, testMarket, testChannel, testRRP, testBDN)
-    
-    MsgBox "Min Price: £" & results(0) & vbCrLf & _
-           "Max Price: £" & results(1) & vbCrLf & _
-           "Max Discount: " & results(2) & "%" & vbCrLf & _
-           "Can Discount: " & results(3) & vbCrLf & _
-           "Applied Rules: " & results(4), vbInformation, "Rule Test Results"
 End Sub
+
+Sub CreateMonthlySummaryReport()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets.Add
+    ws.Name = "PricingSummary_" & Format(Date, "yyyy_mm")
+    
+    With ws
+        .Cells(1, 1).Value = "Report Generated: " & Format(Now, "yyyy-mm-dd hh:mm:ss")
+        .Cells(3, 1).Resize(1, 9).Value = Array("SKU", "Market", "Channel", "Brand", "SKU Type", "RRP Master", "Sell Price Master", "Active Promos", "RRP Coverage %")
+        .Range("A3:I3").Font.Bold = True
+        .Range("A3:I3").Interior.color = RGB(200, 200, 200)
+    End With
+    
+    MsgBox "Monthly summary report created.", vbInformation
+End Sub
+
+
 
