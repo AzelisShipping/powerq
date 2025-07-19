@@ -1,0 +1,79 @@
+Private Sub Worksheet_Change(ByVal Target As Range)
+    Application.EnableEvents = False
+    
+    ' Check if in bulk mode
+    If bulkUpdateMode Then
+        ' Ensure pendingRows collection exists
+        If pendingRows Is Nothing Then Set pendingRows = New Collection
+        
+        ' Collect affected rows for batch processing
+        If Not Intersect(Target, Range("AC8:ZZ50000")) Is Nothing Then
+            Dim cell As Range
+            For Each cell In Target
+                If cell.row >= 8 Then
+                    On Error Resume Next
+                    pendingRows.Add cell.row, CStr(cell.row)
+                    On Error GoTo 0
+                End If
+            Next cell
+        End If
+        Application.EnableEvents = True
+        Exit Sub
+    End If
+    
+    ' Normal single-cell change handling
+    If Not Intersect(Target, Range("AC8:ZZ50000")) Is Nothing Then
+        If Target.Columns.Count = 1 And Target.Rows.Count = 1 Then
+            Dim promoRelativeCol As Long: promoRelativeCol = (Target.Column - 29) Mod 4
+            If promoRelativeCol >= 0 And promoRelativeCol <= 3 Then
+                Call RefreshSingleSKU(Target.row)
+            End If
+        ElseIf Target.Cells.Count > 10 Then
+            ' Multiple cells changed - suggest bulk mode
+            If MsgBox("Large paste detected. Enable bulk mode for better performance?", vbYesNo) = vbYes Then
+                Call EnableBulkMode
+                Application.StatusBar = "Bulk mode enabled. Click 'Apply Bulk Changes' when done pasting."
+            End If
+        End If
+    End If
+    
+    Application.EnableEvents = True
+End Sub
+
+Private Sub Worksheet_SelectionChange(ByVal Target As Range)
+    ' Handle button clicks for enhanced analysis
+    If Not Intersect(Target, Range("A4:B4")) Is Nothing Then
+        ' REFRESH ALL button
+        Application.EnableEvents = False
+        Target.Select
+        Application.EnableEvents = True
+        Call RefreshAll
+    ElseIf Not Intersect(Target, Range("C4:E4")) Is Nothing Then
+        ' LOAD EXISTING PROMOS button
+        Application.EnableEvents = False
+        Target.Select
+        Application.EnableEvents = True
+        Call LoadExistingPromos
+    ElseIf Not Intersect(Target, Range("F4:G4")) Is Nothing Then
+        ' CLEAR ALL button
+        Application.EnableEvents = False
+        Target.Select
+        Application.EnableEvents = True
+        Call ClearAllData
+    ElseIf Not Intersect(Target, Range("H4:I4")) Is Nothing Then
+        ' BULK MODE button
+        Application.EnableEvents = False
+        Target.Select
+        Application.EnableEvents = True
+        Call EnableBulkMode
+    ElseIf Not Intersect(Target, Range("J4:K4")) Is Nothing Then
+        ' APPLY BULK button
+        Application.EnableEvents = False
+        Target.Select
+        Application.EnableEvents = True
+        Call ApplyBulkChanges
+    End If
+End Sub
+
+
+
