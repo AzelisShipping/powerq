@@ -1,0 +1,11 @@
+Market
+"UK" meta [IsParameterQuery=true, List={"UK", "DE", "IT", "USA", "ES", "FR"}, DefaultValue=..., Type="Any", IsParameterQueryRequired=true]
+
+
+Channel
+"Webstore" meta [IsParameterQuery=true, List={"eBay", "Amazon", "Webstore"}, DefaultValue=..., Type="Any", IsParameterQueryRequired=true]
+
+Brand
+"Ford" meta [IsParameterQuery=true, List={"Ford", "Omnicraft"}, DefaultValue="Ford", Type="Any", IsParameterQueryRequired=true]
+
+
