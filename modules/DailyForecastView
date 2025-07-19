@@ -1,0 +1,740 @@
+Option Explicit
+
+' === DAILY FORECAST VIEW MODULE - REDESIGNED ===
+' Shows aggregated daily data by promo type
+' Optimized for 30K+ SKUs
+
+Private Const DAILY_SHEET As String = "DailyForecast"
+Private Const PROMO_TYPE_START_ROW As Long = 8
+Private Const DAY_START_COL As Long = 3
+
+' Promo type rows
+Private Const ROW_RRP As Long = 8
+Private Const ROW_STRIKE As Long = 9
+Private Const ROW_COUPON As Long = 10
+Private Const ROW_NONSTRIKE As Long = 11
+Private Const ROW_TOTAL_QTY As Long = 13
+Private Const ROW_TOTAL_REV As Long = 14
+
+Private Const CHART_START_ROW As Long = 18
+
+' Data dictionaries
+Private dailyPromoDict As Object
+Private skuDataDict As Object
+
+Sub SetupDailyForecastSheet()
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
+    On Error GoTo 0
+    
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add
+        ws.Name = DAILY_SHEET
+    End If
+    
+    Application.ScreenUpdating = False
+    ws.Cells.Clear
+    
+    With ws
+        ' Title
+        .Range("A1").Value = "DAILY FORECAST BY PROMO TYPE"
+        .Range("A1").Font.Bold = True
+        .Range("A1").Font.Size = 16
+        .Range("A1").Interior.color = RGB(0, 102, 204)
+        .Range("A1").Font.color = RGB(255, 255, 255)
+        .Range("A1:AH1").Merge
+        
+        ' Month selector
+        .Range("A3").Value = "SELECT MONTH:"
+        .Range("A3").Font.Bold = True
+        .Range("A3").Font.Size = 12
+        
+        .Range("B3").Value = Format(Date, "mmm yyyy")
+        .Range("B3").Font.Bold = True
+        .Range("B3").Font.Size = 12
+        .Range("B3").Interior.color = RGB(255, 255, 200)
+        .Range("B3").Borders.LineStyle = xlContinuous
+        .Range("B3").HorizontalAlignment = xlCenter
+        
+        ' Add month validation
+        With .Range("B3").Validation
+            .Delete
+            .Add Type:=xlValidateList, Formula1:=GetNext12Months()
+            .InCellDropdown = True
+        End With
+        
+        ' Summary info
+        .Range("D3").Value = "Total SKUs:"
+        .Range("E3").Font.Bold = True
+        .Range("F3").Value = "Month Total Qty:"
+        .Range("G3").Font.Bold = True
+        .Range("G3").NumberFormat = "#,##0"
+        .Range("H3").Value = "Month Total Rev:"
+        .Range("I3").Font.Bold = True
+        .Range("I3").NumberFormat = "£#,##0"
+        
+        ' Add control buttons
+        AddDailyControlButtons ws
+        
+        ' Headers
+        .Range("A7").Value = "PROMO TYPE"
+        .Range("A7").Font.Bold = True
+        .Range("A7").Interior.color = RGB(0, 102, 204)
+        .Range("A7").Font.color = RGB(255, 255, 255)
+        .Range("A7:B7").Merge
+        
+        ' Promo type labels
+        .Range("A8").Value = "RRP"
+        .Range("B8").Value = "Qty"
+        .Range("A9").Value = "Strike-Through"
+        .Range("B9").Value = "Qty"
+        .Range("A10").Value = "Coupon"
+        .Range("B10").Value = "Qty"
+        .Range("A11").Value = "Non-Strike"
+        .Range("B11").Value = "Qty"
+        
+        ' Format promo type rows
+        .Range("A8:B8").Interior.color = RGB(200, 255, 200)
+        .Range("A9:B9").Interior.color = RGB(255, 242, 204)
+        .Range("A10:B10").Interior.color = RGB(221, 235, 247)
+        .Range("A11:B11").Interior.color = RGB(240, 255, 240)
+        
+        .Range("A8:A11").Font.Bold = True
+        .Range("B8:B11").Font.Size = 9
+        .Range("B8:B11").HorizontalAlignment = xlRight
+        
+        ' Total rows
+        .Range("A13").Value = "TOTAL QTY"
+        .Range("A13").Font.Bold = True
+        .Range("A13").Interior.color = RGB(255, 192, 0)
+        .Range("A13:B13").Merge
+        
+        .Range("A14").Value = "TOTAL REVENUE"
+        .Range("A14").Font.Bold = True
+        .Range("A14").Interior.color = RGB(0, 176, 80)
+        .Range("A14").Font.color = RGB(255, 255, 255)
+        .Range("A14:B14").Merge
+        
+        ' Day headers will be added dynamically
+        
+        ' Chart area
+        .Cells(CHART_START_ROW, 1).Value = "DAILY FORECAST CHARTS"
+        .Cells(CHART_START_ROW, 1).Font.Bold = True
+        .Cells(CHART_START_ROW, 1).Font.Size = 14
+        .Cells(CHART_START_ROW, 1).Interior.color = RGB(0, 102, 204)
+        .Cells(CHART_START_ROW, 1).Font.color = RGB(255, 255, 255)
+        .Range(.Cells(CHART_START_ROW, 1), .Cells(CHART_START_ROW, 10)).Merge
+        
+        ' Column widths
+        .Columns("A").ColumnWidth = 15
+        .Columns("B").ColumnWidth = 8
+        
+        ' Freeze panes
+        .Activate
+        .Range("C8").Select
+        ActiveWindow.FreezePanes = True
+        
+        .Range("A1").Select
+    End With
+    
+    Application.ScreenUpdating = True
+End Sub
+
+Private Function GetNext12Months() As String
+    Dim monthList As String
+    Dim i As Long
+    For i = 0 To 11
+        If i > 0 Then monthList = monthList & ","
+        monthList = monthList & Format(DateAdd("m", i, Date), "mmm yyyy")
+    Next i
+    GetNext12Months = monthList
+End Function
+
+Private Sub AddDailyControlButtons(ws As Worksheet)
+    ' Delete existing buttons
+    Dim shp As Shape
+    For Each shp In ws.Shapes
+        On Error Resume Next
+        If shp.Type = 8 Then shp.Delete
+        On Error GoTo 0
+    Next shp
+    
+    ' Add buttons
+    With ws.Buttons.Add(10, 80, 120, 25)
+        .Name = "btnCalculateDaily"
+        .Text = "CALCULATE DAILY"
+        .OnAction = "CalculateDailyForecasts"
+    End With
+    
+    With ws.Buttons.Add(140, 80, 120, 25)
+        .Name = "btnLoadFromAnalysis"
+        .Text = "LOAD FROM ANALYSIS"
+        .OnAction = "LoadFromAnalysisSheet"
+    End With
+    
+    With ws.Buttons.Add(270, 80, 100, 25)
+        .Name = "btnClearDaily"
+        .Text = "CLEAR DATA"
+        .OnAction = "ClearDailyData"
+    End With
+    
+    With ws.Buttons.Add(380, 80, 120, 25)
+        .Name = "btnExportDaily"
+        .Text = "EXPORT DATA"
+        .OnAction = "ExportDailyData"
+    End With
+End Sub
+
+Sub CalculateDailyForecasts()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
+    Dim selectedMonth As String: selectedMonth = ws.Range("B3").Value
+    
+    If selectedMonth = "" Then
+        MsgBox "Please select a month first!", vbExclamation
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Calculating daily forecasts..."
+    
+    ' Initialize dictionaries
+    Set dailyPromoDict = CreateObject("Scripting.Dictionary")
+    Set skuDataDict = CreateObject("Scripting.Dictionary")
+    
+    ' Clear existing daily data
+    ws.Range("C7:AH14").ClearContents
+    ws.Range("C7:AH14").Interior.color = xlNone
+    
+    ' Get month details
+    Dim targetMonth As Date
+    Dim monthParts() As String
+    monthParts = Split(selectedMonth, " ")
+    If UBound(monthParts) = 1 Then
+        Dim monthNum As Long
+        Select Case UCase(Left(monthParts(0), 3))
+            Case "JAN": monthNum = 1
+            Case "FEB": monthNum = 2
+            Case "MAR": monthNum = 3
+            Case "APR": monthNum = 4
+            Case "MAY": monthNum = 5
+            Case "JUN": monthNum = 6
+            Case "JUL": monthNum = 7
+            Case "AUG": monthNum = 8
+            Case "SEP": monthNum = 9
+            Case "OCT": monthNum = 10
+            Case "NOV": monthNum = 11
+            Case "DEC": monthNum = 12
+        End Select
+        targetMonth = DateSerial(Val(monthParts(1)), monthNum, 1)
+    Else
+        targetMonth = DateSerial(Year(Date), Month(Date), 1)
+    End If
+    
+    Dim monthStart As Date: monthStart = DateSerial(Year(targetMonth), Month(targetMonth), 1)
+    Dim monthEnd As Date: monthEnd = DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0)
+    Dim daysInMonth As Long: daysInMonth = Day(monthEnd)
+    Dim monthIndex As Long: monthIndex = DateDiff("m", Date, targetMonth) + 1
+    
+    ' Add day headers
+    Dim col As Long, d As Long
+    For d = 1 To daysInMonth
+        col = DAY_START_COL + d - 1
+        ws.Cells(7, col).Value = d
+        ws.Cells(7, col).Font.Bold = True
+        ws.Cells(7, col).Interior.color = RGB(200, 200, 200)
+        ws.Cells(7, col).HorizontalAlignment = xlCenter
+        ws.Columns(col).ColumnWidth = 9
+    Next d
+    
+    ' Get Analysis sheet
+    Dim analysisWs As Worksheet
+    On Error Resume Next
+    Set analysisWs = ThisWorkbook.Worksheets("Analysis")
+    On Error GoTo 0
+    
+    If analysisWs Is Nothing Then
+        MsgBox "Analysis sheet not found! Please run Analysis first.", vbExclamation
+        GoTo Cleanup
+    End If
+    
+    ' Initialize daily arrays
+    Dim dailyRRP() As Double, dailyStrike() As Double
+    Dim dailyCoupon() As Double, dailyNonStrike() As Double
+    Dim dailyTotalQty() As Double, dailyTotalRev() As Double
+    
+    ReDim dailyRRP(1 To daysInMonth)
+    ReDim dailyStrike(1 To daysInMonth)
+    ReDim dailyCoupon(1 To daysInMonth)
+    ReDim dailyNonStrike(1 To daysInMonth)
+    ReDim dailyTotalQty(1 To daysInMonth)
+    ReDim dailyTotalRev(1 To daysInMonth)
+    
+    ' Process each SKU from Analysis sheet
+    Dim lastRow As Long: lastRow = analysisWs.Cells(analysisWs.Rows.Count, 2).End(xlUp).row
+    Dim totalSKUs As Long: totalSKUs = 0
+    Dim monthTotalQty As Double: monthTotalQty = 0
+    Dim monthTotalRev As Double: monthTotalRev = 0
+    
+    Dim row As Long
+    For row = 8 To lastRow
+        Dim sku As String: sku = Trim(analysisWs.Cells(row, 2).Value)
+        If sku <> "" And sku <> "Paste SKUs here..." Then
+            totalSKUs = totalSKUs + 1
+            
+            ' Get monthly data
+            Dim baseQty As Double: baseQty = Val(analysisWs.Cells(row, 3).Value)
+            Dim basePrice As Double: basePrice = Val(analysisWs.Cells(row, 4).Value)
+            Dim monthQtyCol As Long: monthQtyCol = 4 + monthIndex
+            Dim monthRevCol As Long: monthRevCol = 16 + monthIndex
+            Dim monthlyQty As Double: monthlyQty = Val(analysisWs.Cells(row, monthQtyCol).Value)
+            Dim monthlyRev As Double: monthlyRev = Val(analysisWs.Cells(row, monthRevCol).Value)
+            
+            If monthlyQty > 0 Then
+                monthTotalQty = monthTotalQty + monthlyQty
+                monthTotalRev = monthTotalRev + monthlyRev
+                
+                ' Get promos for this SKU
+                Dim promos As Collection
+                Set promos = GetSKUPromosForMonth(analysisWs, row, monthIndex)
+                
+                ' Calculate daily allocation
+                AllocateDailyByPromo sku, monthlyQty, monthlyRev, basePrice, promos, _
+                    monthStart, daysInMonth, dailyRRP, dailyStrike, dailyCoupon, _
+                    dailyNonStrike, dailyTotalQty, dailyTotalRev
+            End If
+        End If
+        
+        If totalSKUs Mod 100 = 0 Then
+            Application.StatusBar = "Processing SKU " & totalSKUs & "..."
+            DoEvents
+        End If
+    Next row
+    
+    ' Write results to sheet
+    For d = 1 To daysInMonth
+        col = DAY_START_COL + d - 1
+        
+        ' RRP
+        ws.Cells(ROW_RRP, col).Value = Round(dailyRRP(d), 0)
+        ws.Cells(ROW_RRP, col).NumberFormat = "#,##0"
+        
+        ' Strike-Through
+        ws.Cells(ROW_STRIKE, col).Value = Round(dailyStrike(d), 0)
+        ws.Cells(ROW_STRIKE, col).NumberFormat = "#,##0"
+        
+        ' Coupon
+        ws.Cells(ROW_COUPON, col).Value = Round(dailyCoupon(d), 0)
+        ws.Cells(ROW_COUPON, col).NumberFormat = "#,##0"
+        
+        ' Non-Strike
+        ws.Cells(ROW_NONSTRIKE, col).Value = Round(dailyNonStrike(d), 0)
+        ws.Cells(ROW_NONSTRIKE, col).NumberFormat = "#,##0"
+        
+        ' Totals
+        ws.Cells(ROW_TOTAL_QTY, col).Value = Round(dailyTotalQty(d), 0)
+        ws.Cells(ROW_TOTAL_QTY, col).NumberFormat = "#,##0"
+        ws.Cells(ROW_TOTAL_QTY, col).Font.Bold = True
+        ws.Cells(ROW_TOTAL_QTY, col).Interior.color = RGB(255, 242, 204)
+        
+        ws.Cells(ROW_TOTAL_REV, col).Value = Round(dailyTotalRev(d), 0)
+        ws.Cells(ROW_TOTAL_REV, col).NumberFormat = "£#,##0"
+        ws.Cells(ROW_TOTAL_REV, col).Font.Bold = True
+        ws.Cells(ROW_TOTAL_REV, col).Interior.color = RGB(221, 235, 247)
+    Next d
+    
+    ' Update summary
+    ws.Range("E3").Value = totalSKUs
+    ws.Range("G3").Value = Round(monthTotalQty, 0)
+    ws.Range("I3").Value = Round(monthTotalRev, 0)
+    
+    ' Auto-generate charts
+    GenerateDailyCharts
+    
+Cleanup:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    
+    If totalSKUs > 0 Then
+        MsgBox "Daily forecasts calculated for " & totalSKUs & " SKUs!", vbInformation
+    End If
+End Sub
+
+Private Function GetSKUPromosForMonth(analysisWs As Worksheet, row As Long, monthIndex As Long) As Collection
+    Dim promos As New Collection
+    Dim promoStartCol As Long
+    
+    ' Calculate column range for selected month (3 promos per month, 4 cols each)
+    ' In Analysis sheet, promos start at column AC (29)
+    promoStartCol = 29 + ((monthIndex - 1) * 12)
+    
+    Dim p As Long
+    For p = 0 To 2
+        Dim typeCol As Long: typeCol = promoStartCol + (p * 4)
+        Dim promoType As String: promoType = Trim(analysisWs.Cells(row, typeCol).Value)
+        
+        If promoType <> "" And promoType <> "None" Then
+            Dim promoData As Object: Set promoData = CreateObject("Scripting.Dictionary")
+            promoData("Type") = promoType
+            promoData("Value") = analysisWs.Cells(row, typeCol + 1).Value
+            promoData("Start") = analysisWs.Cells(row, typeCol + 2).Value
+            promoData("End") = analysisWs.Cells(row, typeCol + 3).Value
+            
+            promos.Add promoData
+        End If
+    Next p
+    
+    Set GetSKUPromosForMonth = promos
+End Function
+
+Private Sub AllocateDailyByPromo(sku As String, monthlyQty As Double, monthlyRev As Double, _
+    basePrice As Double, promos As Collection, monthStart As Date, daysInMonth As Long, _
+    dailyRRP() As Double, dailyStrike() As Double, dailyCoupon() As Double, _
+    dailyNonStrike() As Double, dailyTotalQty() As Double, dailyTotalRev() As Double)
+    
+    ' Calculate daily baseline
+    Dim dailyBase As Double: dailyBase = monthlyQty / daysInMonth
+    
+    ' Initialize allocation array
+    Dim dailyAllocation() As String
+    ReDim dailyAllocation(1 To daysInMonth)
+    Dim d As Long
+    
+    ' Default all days to RRP
+    For d = 1 To daysInMonth
+        dailyAllocation(d) = "RRP"
+    Next d
+    
+    ' Apply promo periods
+    If promos.Count > 0 Then
+        Dim promo As Variant
+        For Each promo In promos
+            Dim promoStart As Date: promoStart = promo("Start")
+            Dim promoEnd As Date: promoEnd = promo("End")
+            Dim promoType As String: promoType = promo("Type")
+            
+            ' Calculate affected days
+            Dim startDay As Long: startDay = 1
+            Dim endDay As Long: endDay = daysInMonth
+            
+            If promoStart > monthStart Then
+                startDay = Day(promoStart)
+            End If
+            
+            If Month(promoEnd) = Month(monthStart) And Year(promoEnd) = Year(monthStart) Then
+                endDay = Day(promoEnd)
+            End If
+            
+            ' Mark days with promo type
+            For d = startDay To endDay
+                If d >= 1 And d <= daysInMonth Then
+                    dailyAllocation(d) = promoType
+                End If
+            Next d
+        Next promo
+    End If
+    
+    ' Apply lift factors (simplified - you can enhance with actual lift data)
+    Dim liftFactors As Object: Set liftFactors = CreateObject("Scripting.Dictionary")
+    liftFactors("RRP") = 1#
+    liftFactors("Strike-Through") = 1.25
+    liftFactors("Coupon") = 1.2
+    liftFactors("Non-Strike-Through") = 1.15
+    
+    ' Calculate daily values with lift
+    Dim totalLiftedDays As Double: totalLiftedDays = 0
+    For d = 1 To daysInMonth
+        Dim lift As Double: lift = liftFactors(dailyAllocation(d))
+        totalLiftedDays = totalLiftedDays + lift
+    Next d
+    
+    ' Normalize to match monthly total
+    Dim normalizedDaily As Double: normalizedDaily = monthlyQty / totalLiftedDays
+    
+    ' Allocate to arrays
+    For d = 1 To daysInMonth
+        Dim dayQty As Double: dayQty = normalizedDaily * liftFactors(dailyAllocation(d))
+        Dim dayRev As Double: dayRev = (monthlyRev / monthlyQty) * dayQty
+        
+        Select Case dailyAllocation(d)
+            Case "RRP"
+                dailyRRP(d) = dailyRRP(d) + dayQty
+            Case "Strike-Through"
+                dailyStrike(d) = dailyStrike(d) + dayQty
+            Case "Coupon"
+                dailyCoupon(d) = dailyCoupon(d) + dayQty
+            Case "Non-Strike-Through"
+                dailyNonStrike(d) = dailyNonStrike(d) + dayQty
+        End Select
+        
+        dailyTotalQty(d) = dailyTotalQty(d) + dayQty
+        dailyTotalRev(d) = dailyTotalRev(d) + dayRev
+    Next d
+End Sub
+
+Sub GenerateDailyCharts()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
+    Dim selectedMonth As String: selectedMonth = ws.Range("B3").Value
+    
+    If selectedMonth = "" Then Exit Sub
+    
+    ' Delete existing charts
+    Dim cht As ChartObject
+    For Each cht In ws.ChartObjects
+        cht.Delete
+    Next cht
+    
+    ' Get days in month
+    Dim targetMonth As Date
+    Dim monthParts() As String
+    monthParts = Split(selectedMonth, " ")
+    If UBound(monthParts) = 1 Then
+        Dim monthNum As Long
+        Select Case UCase(Left(monthParts(0), 3))
+            Case "JAN": monthNum = 1
+            Case "FEB": monthNum = 2
+            Case "MAR": monthNum = 3
+            Case "APR": monthNum = 4
+            Case "MAY": monthNum = 5
+            Case "JUN": monthNum = 6
+            Case "JUL": monthNum = 7
+            Case "AUG": monthNum = 8
+            Case "SEP": monthNum = 9
+            Case "OCT": monthNum = 10
+            Case "NOV": monthNum = 11
+            Case "DEC": monthNum = 12
+        End Select
+        targetMonth = DateSerial(Val(monthParts(1)), monthNum, 1)
+    Else
+        targetMonth = Date
+    End If
+    Dim daysInMonth As Long: daysInMonth = Day(DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0))
+    
+    ' Create stacked column chart for quantity
+    CreateStackedChart ws, "Daily Quantity by Promo Type", CHART_START_ROW + 2, daysInMonth, False
+    
+    ' Create line chart for revenue
+    CreateRevenueChart ws, "Daily Revenue", CHART_START_ROW + 22, daysInMonth
+End Sub
+
+Private Sub CreateStackedChart(ws As Worksheet, chartTitle As String, chartRow As Long, daysInMonth As Long, isRevenue As Boolean)
+    Dim cht As ChartObject
+    Set cht = ws.ChartObjects.Add(Left:=ws.Cells(chartRow, 1).Left, _
+                                   Top:=ws.Cells(chartRow, 1).Top, _
+                                   Width:=900, Height:=300)
+    
+    With cht.Chart
+        .ChartType = xlColumnStacked
+        .HasTitle = True
+        .chartTitle.Text = chartTitle & " - " & ws.Range("B3").Value
+        
+        ' Add series for each promo type
+        Dim seriesNames As Variant: seriesNames = Array("RRP", "Strike-Through", "Coupon", "Non-Strike")
+        Dim seriesRows As Variant: seriesRows = Array(ROW_RRP, ROW_STRIKE, ROW_COUPON, ROW_NONSTRIKE)
+        Dim seriesColors As Variant: seriesColors = Array(RGB(200, 255, 200), RGB(255, 192, 0), RGB(0, 176, 240), RGB(146, 208, 80))
+        
+        Dim i As Long
+        For i = 0 To 3
+            .SeriesCollection.NewSeries
+            .SeriesCollection(i + 1).Name = seriesNames(i)
+            .SeriesCollection(i + 1).Values = ws.Range(ws.Cells(seriesRows(i), DAY_START_COL), _
+                                                       ws.Cells(seriesRows(i), DAY_START_COL + daysInMonth - 1))
+            .SeriesCollection(i + 1).Format.Fill.ForeColor.RGB = seriesColors(i)
+        Next i
+        
+        ' X-axis labels
+        .SeriesCollection(1).XValues = ws.Range(ws.Cells(7, DAY_START_COL), _
+                                               ws.Cells(7, DAY_START_COL + daysInMonth - 1))
+        
+        ' Format axes
+        .Axes(xlCategory).HasTitle = True
+        .Axes(xlCategory).AxisTitle.Text = "Day of Month"
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Quantity"
+        .Axes(xlValue).TickLabels.NumberFormat = "#,##0"
+        
+        ' Legend
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+End Sub
+
+Private Sub CreateRevenueChart(ws As Worksheet, chartTitle As String, chartRow As Long, daysInMonth As Long)
+    Dim cht As ChartObject
+    Set cht = ws.ChartObjects.Add(Left:=ws.Cells(chartRow, 1).Left, _
+                                   Top:=ws.Cells(chartRow, 1).Top, _
+                                   Width:=900, Height:=300)
+    
+    With cht.Chart
+        .ChartType = xlLine
+        .HasTitle = True
+        .chartTitle.Text = chartTitle & " - " & ws.Range("B3").Value
+        
+        ' Add revenue series
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "Daily Revenue"
+        .SeriesCollection(1).Values = ws.Range(ws.Cells(ROW_TOTAL_REV, DAY_START_COL), _
+                                              ws.Cells(ROW_TOTAL_REV, DAY_START_COL + daysInMonth - 1))
+        .SeriesCollection(1).XValues = ws.Range(ws.Cells(7, DAY_START_COL), _
+                                               ws.Cells(7, DAY_START_COL + daysInMonth - 1))
+        
+        ' Format
+        .SeriesCollection(1).Format.Line.Weight = 3
+        .SeriesCollection(1).Format.Line.ForeColor.RGB = RGB(0, 102, 204)
+        .SeriesCollection(1).MarkerStyle = xlMarkerStyleCircle
+        .SeriesCollection(1).MarkerSize = 6
+        
+        ' Axes
+        .Axes(xlCategory).HasTitle = True
+        .Axes(xlCategory).AxisTitle.Text = "Day of Month"
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Revenue (£)"
+        .Axes(xlValue).TickLabels.NumberFormat = "£#,##0"
+        
+        ' Add data labels
+        .SeriesCollection(1).HasDataLabels = True
+        .SeriesCollection(1).DataLabels.NumberFormat = "£#,##0"
+        .SeriesCollection(1).DataLabels.Position = xlLabelPositionAbove
+        .SeriesCollection(1).DataLabels.Font.Size = 8
+        
+        ' Only show labels every 5 days to avoid clutter
+        Dim pt As Long
+        For pt = 1 To .SeriesCollection(1).Points.Count
+            If pt Mod 5 <> 1 Then
+                .SeriesCollection(1).Points(pt).DataLabel.Delete
+            End If
+        Next pt
+    End With
+End Sub
+
+Sub LoadFromAnalysisSheet()
+    ' This is now integrated into CalculateDailyForecasts
+    MsgBox "Data is automatically loaded from Analysis sheet when you click 'Calculate Daily'", vbInformation
+End Sub
+
+Sub ClearDailyData()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
+    
+    If MsgBox("Clear all daily forecast data?", vbYesNo + vbQuestion) = vbNo Then Exit Sub
+    
+    Application.ScreenUpdating = False
+    
+    ' Clear data area
+    ws.Range("C7:AH14").ClearContents
+    ws.Range("C7:AH14").Interior.color = xlNone
+    
+    ' Clear charts
+    Dim cht As ChartObject
+    For Each cht In ws.ChartObjects
+        cht.Delete
+    Next cht
+    
+    ' Reset summary
+    ws.Range("E3").Value = 0
+    ws.Range("G3").Value = 0
+    ws.Range("I3").Value = 0
+    
+    Application.ScreenUpdating = True
+    MsgBox "Data cleared!", vbInformation
+End Sub
+
+Sub ExportDailyData()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
+    Dim selectedMonth As String: selectedMonth = ws.Range("B3").Value
+    
+    If selectedMonth = "" Then
+        MsgBox "Please select a month first!", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Create export sheet
+    Dim exportWs As Worksheet
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("DailyExport").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    
+    Set exportWs = ThisWorkbook.Worksheets.Add
+    exportWs.Name = "DailyExport"
+    
+    ' Get month details
+    Dim targetMonth As Date
+    Dim monthParts() As String
+    monthParts = Split(selectedMonth, " ")
+    If UBound(monthParts) = 1 Then
+        Dim monthNum As Long
+        Select Case UCase(Left(monthParts(0), 3))
+            Case "JAN": monthNum = 1
+            Case "FEB": monthNum = 2
+            Case "MAR": monthNum = 3
+            Case "APR": monthNum = 4
+            Case "MAY": monthNum = 5
+            Case "JUN": monthNum = 6
+            Case "JUL": monthNum = 7
+            Case "AUG": monthNum = 8
+            Case "SEP": monthNum = 9
+            Case "OCT": monthNum = 10
+            Case "NOV": monthNum = 11
+            Case "DEC": monthNum = 12
+        End Select
+        targetMonth = DateSerial(Val(monthParts(1)), monthNum, 1)
+    Else
+        targetMonth = Date
+    End If
+    Dim daysInMonth As Long: daysInMonth = Day(DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0))
+    
+    ' Headers
+    With exportWs
+        .Range("A1").Value = "Daily Forecast Export - " & selectedMonth
+        .Range("A1").Font.Bold = True
+        .Range("A1").Font.Size = 14
+        
+        .Range("A3").Value = "Date"
+        .Range("B3").Value = "Day"
+        .Range("C3").Value = "RRP Qty"
+        .Range("D3").Value = "Strike-Through Qty"
+        .Range("E3").Value = "Coupon Qty"
+        .Range("F3").Value = "Non-Strike Qty"
+        .Range("G3").Value = "Total Qty"
+        .Range("H3").Value = "Total Revenue"
+        
+        .Range("A3:H3").Font.Bold = True
+        .Range("A3:H3").Interior.color = RGB(200, 200, 200)
+    End With
+    
+    ' Export data
+    Dim exportRow As Long: exportRow = 4
+    Dim d As Long
+    
+    For d = 1 To daysInMonth
+        Dim dayDate As Date: dayDate = DateSerial(Year(targetMonth), Month(targetMonth), d)
+        Dim col As Long: col = DAY_START_COL + d - 1
+        
+        exportWs.Cells(exportRow, 1).Value = dayDate
+        exportWs.Cells(exportRow, 2).Value = d
+        exportWs.Cells(exportRow, 3).Value = ws.Cells(ROW_RRP, col).Value
+        exportWs.Cells(exportRow, 4).Value = ws.Cells(ROW_STRIKE, col).Value
+        exportWs.Cells(exportRow, 5).Value = ws.Cells(ROW_COUPON, col).Value
+        exportWs.Cells(exportRow, 6).Value = ws.Cells(ROW_NONSTRIKE, col).Value
+        exportWs.Cells(exportRow, 7).Value = ws.Cells(ROW_TOTAL_QTY, col).Value
+        exportWs.Cells(exportRow, 8).Value = ws.Cells(ROW_TOTAL_REV, col).Value
+        
+        exportRow = exportRow + 1
+    Next d
+    
+    ' Format
+    With exportWs
+        .Columns("A:H").AutoFit
+        .Columns("A").NumberFormat = "dd/mm/yyyy"
+        .Columns("C:G").NumberFormat = "#,##0"
+        .Columns("H").NumberFormat = "£#,##0"
+        .Activate
+    End With
+    
+    MsgBox "Export complete!", vbInformation
+End Sub
+
