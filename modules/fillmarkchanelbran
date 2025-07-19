@@ -1,0 +1,35 @@
+Sub AutoFillMarketChannelBrand()
+    Dim ws As Worksheet: Set ws = ActiveSheet
+    Dim lastRow As Long
+    Dim marketVal, channelVal, brandVal, skutypeVal
+    
+    ' Find last row with data in column E (SKU column)
+    lastRow = ws.Range("E" & ws.Rows.Count).End(xlUp).row
+    
+    ' Get source values from named cells
+    marketVal = ws.Range("Market").Value
+    channelVal = ws.Range("Channel").Value
+    brandVal = ws.Range("Brand").Value
+    skutypeVal = ws.Range("SKUType").Value
+    
+    ' Debug info
+    MsgBox "Last row: " & lastRow & vbCrLf & _
+           "Market: " & marketVal & vbCrLf & _
+           "Channel: " & channelVal & vbCrLf & _
+           "Brand: " & brandVal & vbCrLf & _
+           "SKU Type: " & skutypeVal, vbInformation
+    
+    ' Only proceed if we have data
+    If lastRow > 10 And marketVal <> "" And channelVal <> "" And brandVal <> "" And skutypeVal <> "" Then
+        ' Fill using direct assignment starting from row 10
+        ws.Range("C10:C" & lastRow).Value = marketVal
+        ws.Range("D10:D" & lastRow).Value = channelVal
+        ws.Range("F10:F" & lastRow).Value = brandVal
+        ws.Range("G10:G" & lastRow).Value = skutypeVal
+        
+        MsgBox "Successfully filled rows 10 to " & lastRow, vbInformation
+    Else
+        MsgBox "Issue: LastRow=" & lastRow & " or source cells empty", vbCritical
+    End If
+End Sub
+
