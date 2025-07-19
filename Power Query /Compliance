@@ -1,0 +1,119 @@
+//=================================================================
+//  PromoMetrics  –  rolling-12-month promo-compliance snapshot
+//=================================================================
+let
+//-----------------------------------------------------------------
+// 0. parameters & helpers
+    pMarket   = Market,                     // e.g. "UK"
+    pChannel  = Channel,                    // e.g. "Webstore"
+    Today     = Date.From(DateTime.LocalNow()),
+    CutOff    = Date.AddDays(Today, -365),
+    ruleDays  = if pMarket = "UK" then 14 else 30,
+//-----------------------------------------------------------------
+// 1. source table (already loaded by your ETL)
+    Src = PromoRows,
+//-----------------------------------------------------------------
+// 2. filter – market / channel / last-12-m rows
+    Filt = Table.SelectRows(Src,
+            each Text.Upper([Market])  = Text.Upper(pMarket) and
+                 Text.Upper([Channel]) = Text.Upper(pChannel) and
+                 [EndDate] >= CutOff),
+//-----------------------------------------------------------------
+// 3. helper columns
+    AddDur = Table.AddColumn(Filt, "Dur",
+             each Duration.Days([EndDate]-[StartDate])+1, Int64.Type),
+
+    //  Coupon is counted as RRP for compliance, but we’ll
+    //  still flag it as a “live promo” later.
+    AddFlag = Table.AddColumn(AddDur, "Flag", each
+             if List.Contains({"RRP","Coupon"}, [DiscountType]) then "RRP"
+             else if [DiscountType]="NonStrike" and pMarket="UK" then "Exempt"
+             else "Discount", type text),
+//-----------------------------------------------------------------
+// 4. group by SKU
+    Grouped = Table.Group(AddFlag, {"SKU"},
+        {{"Rows", each _, type table
+            [SKU=text, DiscountType=text, DiscountAmt=number,
+             StartDate=date, EndDate=date, RRPMaster=number,
+             Dur=number, Flag=text]}} ),
+//-----------------------------------------------------------------
+// 5. per-SKU metrics
+    Metrics = Table.AddColumn(Grouped, "M", each
+        let
+            t = [Rows],
+
+            // --------------------------------------------------------
+            //  LIVE PROMO TODAY? – Coupon OR real Discount
+            curTbl   = Table.SelectRows(t,
+                       each ([DiscountType] = "Coupon" or [Flag]="Discount")
+                         and [StartDate] <= Today and [EndDate] >= Today),
+            onNow    = Table.RowCount(curTbl) > 0,
+            cRec     = if onNow then curTbl{0} else null,
+            cType    = if onNow then cRec[DiscountType] else null,
+            cEnd     = if onNow then cRec[EndDate]      else null,
+            cLeft    = if onNow then Duration.Days(cEnd - Today)+1 else null,
+
+            // --------------------------------------------------------
+            //  CURRENT RRP price-era  (coupon counted as RRP)
+            rrpTbl   = Table.Sort(Table.SelectRows(t, each [Flag]="RRP"),
+                                   {{"StartDate",Order.Ascending}}),
+            rRows    = Table.ToRecords(rrpTbl),
+            rCnt     = List.Count(rRows),
+
+            res = if rCnt = 0 then
+                    // ─ no RRP rows ─ unlikely, but keep graceful
+                    [OnPromoNow=onNow,CurPromoType=cType,CurPromoEnd=cEnd,DaysLeftPromo=cLeft,
+                     LastRRPStart=null,DaysAtRRP=null,DaysOnPromo=null,MaxDaysLeft50=null,
+                     NextPromoDate=null,DaysUntilNextPromo=null,PctDiscount12m=null]
+
+                  else
+                    let
+                        latest     = rRows{rCnt-1},
+                        curPrice   = latest[RRPMaster],
+
+                        // walk back while price identical
+                        revIdx     = List.Reverse(List.Numbers(0,rCnt)),
+                        chain      = List.FirstN(revIdx, each rRows{_}[RRPMaster]=curPrice),
+                        eraStart   = rRows{ List.Last(chain) }[StartDate],
+
+                        // counts within era (coupon = RRP, strike-through = Discount)
+                        eraRows    = Table.SelectRows(t, each [StartDate] >= eraStart),
+                        daysRRP    = List.Sum(Table.SelectRows(eraRows, each [Flag]="RRP")[Dur]),
+                        daysDis    = List.Sum(Table.SelectRows(eraRows, each [Flag]="Discount")[Dur]),
+                        eraLen     = daysRRP + daysDis,
+                        head50     = eraLen - 2*daysDis,
+
+                        // rolling-12-month discount %
+                        dis12      = List.Sum(
+                                       Table.SelectRows(t,
+                                         each [Flag]="Discount" and [EndDate]>=CutOff)[Dur]),
+                        pct12      = Number.Round( dis12 /
+                                      (Duration.Days(Today-CutOff)+1), 3 ),
+
+                        // earliest legal promo start
+                        baseDate   = Date.AddDays(eraStart, ruleDays),
+                        afterLive  = if onNow then Date.AddDays(cEnd,1) else Today,
+                        rawNext    = if baseDate > afterLive then baseDate else afterLive,
+                        nextDate   = if rawNext < Today then Today else rawNext,
+                        daysToNext = Duration.Days(nextDate - Today)
+                    in
+                        [OnPromoNow           = onNow,
+                         CurPromoType         = cType,
+                         CurPromoEnd          = cEnd,
+                         DaysLeftPromo        = cLeft,
+                         LastRRPStart         = eraStart,
+                         DaysAtRRP            = daysRRP,
+                         DaysOnPromo          = daysDis,
+                         MaxDaysLeft50        = head50,
+                         NextPromoDate        = nextDate,
+                         DaysUntilNextPromo   = daysToNext,
+                         PctDiscount12m       = pct12]
+        in res, type record ),
+//-----------------------------------------------------------------
+// 6. expand → keep dashboard columns
+    Expand = Table.ExpandRecordColumn(Metrics,"M",
+        {"OnPromoNow","CurPromoType","CurPromoEnd","DaysLeftPromo",
+         "LastRRPStart","DaysAtRRP","DaysOnPromo","MaxDaysLeft50",
+         "NextPromoDate","DaysUntilNextPromo","PctDiscount12m"})
+in
+    Expand
