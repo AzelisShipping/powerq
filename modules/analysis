@@ -1,0 +1,1952 @@
+Option Explicit
+
+' === ENHANCED ANALYSIS MODULE FOR EFFECTIVE PROMO CALCULATIONS ===
+' Main analysis functions for multi-SKU forecasting and promo planning
+' PERFORMANCE OPTIMIZED VERSION
+
+Private Const ANALYSIS_SHEET As String = "Analysis"
+Private Const SKU_START_ROW As Long = 8
+Private Const SKU_COL As Long = 2
+Private Const BASELINE_QTY_COL As Long = 3
+Private Const BASELINE_PRICE_COL As Long = 4
+Private Const FORECAST_QTY_START_COL As Long = 5
+Private Const FORECAST_REV_START_COL As Long = 17
+Private Const PROMO_START_COL As Long = 29
+Private Const PROMOS_PER_MONTH As Long = 3
+Private Const PROMO_COLS_PER_SLOT As Long = 4
+
+' === cachedData array index map ===
+Private Const IDX_BASE_QTY As Long = 0
+Private Const IDX_BASE_PRICE As Long = 1
+Private Const IDX_QUALITY As Long = 2
+Private Const IDX_LIFT_STRIKE As Long = 3
+Private Const IDX_LIFT_COUPON As Long = 4
+Private Const IDX_LIFT_NONSTRIKE As Long = 5
+Private Const IDX_LIFT_RRP As Long = 6
+Private Const IDX_PRICE_ELASTICITY As Long = 7
+Private Const IDX_MONTH1 As Long = 8
+Private Const IDX_MONTH12 As Long = 19
+Private Const IDX_JAN As Long = 8
+Private Const IDX_FEB As Long = 9
+Private Const IDX_MAR As Long = 10
+Private Const IDX_APR As Long = 11
+Private Const IDX_MAY As Long = 12
+Private Const IDX_JUN As Long = 13
+Private Const IDX_JUL As Long = 14
+Private Const IDX_AUG As Long = 15
+Private Const IDX_SEP As Long = 16
+Private Const IDX_OCT As Long = 17
+Private Const IDX_NOV As Long = 18
+Private Const IDX_DEC As Long = 19
+
+' Add these new indices after IDX_DEC
+Private Const IDX_SPARSE_DATA As Long = 20
+Private Const IDX_MONTHS_SINCE_FIRST As Long = 21
+Private Const IDX_TOTAL_QTY_SOLD As Long = 22
+Private Const IDX_DATA_CONFIDENCE As Long = 23
+Private Const IDX_ELASTICITY_FACTOR As Long = 24
+
+' === MODULE-LEVEL VARIABLES ===
+' Ultra-fast in-memory data structures
+Private dataDict As Object
+Private seasonalityDict As Object
+Private lastDataLoad As Date
+
+' PERFORMANCE: Add SKU row mapping dictionary for O(1) lookups
+Private skuRowDict As Object
+
+' Bulk operation control
+Private bulkUpdateMode As Boolean
+Private pendingRows As Collection
+
+' === HELPER FUNCTION FOR SAFE COMMENT HANDLING ===
+Private Sub SafeAddComment(cell As Range, commentText As String)
+    On Error Resume Next
+    cell.Comment.Delete
+    On Error GoTo 0
+    
+    cell.AddComment
+    cell.Comment.Text commentText
+    cell.Comment.Shape.TextFrame.AutoSize = True
+End Sub
+
+Sub SetupEnhancedAnalysisSheet()
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    On Error GoTo 0
+    
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add
+        ws.Name = ANALYSIS_SHEET
+    End If
+    
+    Application.ScreenUpdating = False
+    
+    ws.Cells.Clear
+    
+    With ws
+        ' Title section
+        .Range("A1").Value = "ENHANCED MULTI-SKU FORECASTING & PROMO PLANNER"
+        .Range("A1").Font.Bold = True
+        .Range("A1").Font.Size = 16
+        .Range("A1").Interior.color = RGB(0, 102, 204)
+        .Range("A1").Font.color = RGB(255, 255, 255)
+        .Range("A1:Z1").Merge
+        
+        ' Instructions
+        .Range("A2").Value = "INSTRUCTIONS: 1) Paste SKU list in Column B  2) Click REFRESH ALL  3) Add promos  4) Auto-forecasts update"
+        .Range("A2").Font.Size = 10
+        .Range("A2:Z2").Merge
+        .Range("A2").WrapText = True
+        .Range("A2").RowHeight = 25
+        
+        ' Control buttons
+        .Range("A4").Value = "REFRESH ALL"
+        .Range("A4").Font.Bold = True
+        .Range("A4").Interior.color = RGB(0, 176, 80)
+        .Range("A4").HorizontalAlignment = xlCenter
+        .Range("A4:B4").Merge
+        
+        .Range("C4").Value = "LOAD EXISTING PROMOS"
+        .Range("C4").Font.Bold = True
+        .Range("C4").Interior.color = RGB(255, 192, 0)
+        .Range("C4").HorizontalAlignment = xlCenter
+        .Range("C4:E4").Merge
+        
+        .Range("F4").Value = "CLEAR ALL"
+        .Range("F4").Font.Bold = True
+        .Range("F4").Interior.color = RGB(255, 0, 0)
+        .Range("F4").HorizontalAlignment = xlCenter
+        .Range("F4:G4").Merge
+        
+        ' Add bulk update buttons
+        .Range("H4").Value = "BULK MODE"
+        .Range("H4").Font.Bold = True
+        .Range("H4").Interior.color = RGB(0, 176, 240)
+        .Range("H4").HorizontalAlignment = xlCenter
+        .Range("H4:I4").Merge
+
+        .Range("J4").Value = "APPLY BULK"
+        .Range("J4").Font.Bold = True
+        .Range("J4").Interior.color = RGB(0, 176, 80)
+        .Range("J4").HorizontalAlignment = xlCenter
+        .Range("J4:K4").Merge
+        
+        ' Headers
+        .Range("A7").Value = "#"
+        .Range("B7").Value = "SKU"
+        .Range("C7").Value = "Base Qty"
+        .Range("D7").Value = "Base Price"
+        
+        ' Month forecast headers
+        Dim currentDate As Date: currentDate = Date
+        Dim i As Long
+        For i = 0 To 11
+            Dim monthDate As Date: monthDate = DateAdd("m", i, currentDate)
+            
+            ' Quantity headers
+            Dim qtyCol As Long: qtyCol = FORECAST_QTY_START_COL + i
+            .Cells(7, qtyCol).Value = Format(monthDate, "mmm") & " Qty"
+            .Cells(7, qtyCol).Font.Bold = True
+            .Cells(7, qtyCol).Interior.color = RGB(217, 217, 217)
+            .Cells(7, qtyCol).Orientation = 45
+            
+            ' Revenue headers
+            Dim revCol As Long: revCol = FORECAST_REV_START_COL + i
+            .Cells(7, revCol).Value = Format(monthDate, "mmm") & " Rev"
+            .Cells(7, revCol).Font.Bold = True
+            .Cells(7, revCol).Interior.color = RGB(221, 235, 247)
+            .Cells(7, revCol).Orientation = 45
+        Next i
+        
+        ' Promo section header
+        Dim promoHeaderCol As Long: promoHeaderCol = PROMO_START_COL
+        .Cells(6, promoHeaderCol).Value = "--- PROMO PLANNER (3 promos per month) ---"
+        .Cells(6, promoHeaderCol).Font.Bold = True
+        .Cells(6, promoHeaderCol).Font.Size = 12
+        .Cells(6, promoHeaderCol).Interior.color = RGB(255, 165, 0)
+        .Cells(6, promoHeaderCol).Font.color = RGB(255, 255, 255)
+        .Range(.Cells(6, promoHeaderCol), .Cells(6, promoHeaderCol + 143)).Merge
+        
+        ' Promo headers for each month
+        For i = 0 To 11
+            Dim monthName As String: monthName = Format(DateAdd("m", i, currentDate), "mmm")
+            
+            Dim j As Long
+            For j = 1 To PROMOS_PER_MONTH
+                Dim promoStartCol As Long: promoStartCol = PROMO_START_COL + (i * PROMOS_PER_MONTH * PROMO_COLS_PER_SLOT) + ((j - 1) * PROMO_COLS_PER_SLOT)
+                
+                .Cells(7, promoStartCol).Value = monthName & " P" & j & " Type"
+                .Cells(7, promoStartCol + 1).Value = "Value"
+                .Cells(7, promoStartCol + 2).Value = "Start"
+                .Cells(7, promoStartCol + 3).Value = "End"
+                
+                Dim promoColor As Long
+                Select Case j
+                    Case 1: promoColor = RGB(255, 242, 204)
+                    Case 2: promoColor = RGB(221, 235, 247)
+                    Case 3: promoColor = RGB(240, 255, 240)
+                End Select
+                
+                .Range(.Cells(7, promoStartCol), .Cells(7, promoStartCol + 3)).Interior.color = promoColor
+                .Range(.Cells(7, promoStartCol), .Cells(7, promoStartCol + 3)).Font.Bold = True
+                .Range(.Cells(7, promoStartCol), .Cells(7, promoStartCol + 3)).Font.Size = 8
+                
+                ' Format date columns (Start and End) with UK date format
+                .Range(.Cells(8, promoStartCol + 2), .Cells(50000, promoStartCol + 2)).NumberFormat = "dd/mm/yyyy"
+                .Range(.Cells(8, promoStartCol + 3), .Cells(50000, promoStartCol + 3)).NumberFormat = "dd/mm/yyyy"
+            Next j
+        Next i
+        
+        ' Format headers
+        .Range("A7:D7").Font.Bold = True
+        .Range("A7:D7").Interior.color = RGB(0, 102, 204)
+        .Range("A7:D7").Font.color = RGB(255, 255, 255)
+        
+        ' Column widths
+        .Columns("A:A").ColumnWidth = 4
+        .Columns("B:B").ColumnWidth = 12
+        .Columns("C:D").ColumnWidth = 10
+        .Columns("E:P").ColumnWidth = 9
+        .Columns("Q:AB").ColumnWidth = 11
+        .Columns("AC:ZZ").ColumnWidth = 7
+        
+        ' Sample data
+        .Range("A8").Value = "1"
+        .Range("B8").Value = "Paste SKUs here..."
+        .Range("B8").Interior.color = RGB(255, 255, 0)
+        
+        ' Add promo validation
+        AddPromoValidation ws
+        
+        ' Freeze panes
+        .Activate
+        .Range("E8").Select
+        ActiveWindow.FreezePanes = True
+    End With
+    
+    Application.ScreenUpdating = True
+End Sub
+
+Private Sub AddPromoValidation(ws As Worksheet)
+    Dim i As Long, j As Long
+    For i = 0 To 11
+        For j = 1 To PROMOS_PER_MONTH
+            Dim promoCol As Long: promoCol = PROMO_START_COL + (i * PROMOS_PER_MONTH * PROMO_COLS_PER_SLOT) + ((j - 1) * PROMO_COLS_PER_SLOT)
+            Dim validationRange As Range
+            Set validationRange = ws.Range(ws.Cells(8, promoCol), ws.Cells(50000, promoCol))
+            
+            With validationRange.Validation
+                .Delete
+                .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, _
+                     Formula1:="Strike-Through,Coupon,Non-Strike-Through,RRP,BOGOF,Bundle,Flash,None,"
+                .IgnoreBlank = True
+                .InCellDropdown = True
+            End With
+        Next j
+    Next i
+End Sub
+
+Private Function GetSKUListEnhanced() As Collection
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    Dim skuList As New Collection
+    Dim i As Long: i = SKU_START_ROW
+    
+    ' PERFORMANCE: Initialize SKU row mapping dictionary
+    If skuRowDict Is Nothing Then Set skuRowDict = CreateObject("Scripting.Dictionary")
+    skuRowDict.RemoveAll
+    
+    Do While i <= 50000 And ws.Cells(i, SKU_COL).Value <> ""
+        Dim sku As String: sku = Trim(ws.Cells(i, SKU_COL).Value)
+        If sku <> "" And sku <> "Paste SKUs here..." Then
+            On Error Resume Next
+            skuList.Add sku, sku
+            On Error GoTo 0
+            ws.Cells(i, 1).Value = i - SKU_START_ROW + 1 ' Row number
+            
+            ' PERFORMANCE: Store SKU to row mapping for O(1) lookup
+            skuRowDict(UCase(sku)) = i
+        End If
+        i = i + 1
+    Loop
+    
+    Set GetSKUListEnhanced = skuList
+End Function
+
+Private Sub LoadBaselineDataEnhanced(skuList As Collection)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    On Error Resume Next
+    Dim dataWs As Worksheet
+    Set dataWs = ThisWorkbook.Worksheets("ForecastData")
+    
+    If dataWs Is Nothing Then
+        ' Fallback: Try to load from existing data structure
+        LoadDataFromWorksheets
+        On Error GoTo 0
+        Exit Sub
+    End If
+    
+    Dim lastRow As Long: lastRow = dataWs.Cells(dataWs.Rows.Count, 1).End(xlUp).row
+    Dim currentRow As Long: currentRow = SKU_START_ROW
+    
+    ' Clear existing baseline data dictionary if exists
+    If dataDict Is Nothing Then Set dataDict = CreateObject("Scripting.Dictionary")
+    dataDict.RemoveAll
+    
+    ' PERFORMANCE: Read all data at once for faster processing
+    Dim dataRange As Variant
+    If lastRow > 1 Then
+        ' FIXED: Extended range to AF (column 32) to include new sparse data columns
+        dataRange = dataWs.Range("A2:AF" & lastRow).Value
+    Else
+        Exit Sub
+    End If
+    
+    ' PERFORMANCE: Create lookup dictionary for data sheet
+    Dim dataLookup As Object: Set dataLookup = CreateObject("Scripting.Dictionary")
+    Dim i As Long
+    For i = 1 To UBound(dataRange, 1)
+        Dim dataSku As String: dataSku = UCase(Trim(CStr(dataRange(i, 1))))
+        If dataSku <> "" Then
+            dataLookup(dataSku) = i
+        End If
+        
+        ' PERFORMANCE: Memory management for large datasets
+        If i Mod 1000 = 0 Then
+            DoEvents
+        End If
+    Next i
+    
+    ' PERFORMANCE: Batch prepare baseline values
+    Dim baselineValues As Object: Set baselineValues = CreateObject("Scripting.Dictionary")
+    Dim formatRanges As Object: Set formatRanges = CreateObject("Scripting.Dictionary")
+    
+    Dim sku As Variant
+    For Each sku In skuList
+        Dim skuUpper As String: skuUpper = UCase(sku)
+        
+        ' PERFORMANCE: Single dictionary lookup instead of linear search
+        On Error Resume Next
+        Dim dataRowIndex As Long: dataRowIndex = dataLookup(skuUpper)
+        On Error GoTo 0
+        
+        If dataRowIndex > 0 Then
+            Dim baseQty As Double: baseQty = Val(dataRange(dataRowIndex, 6))
+            Dim basePrice As Double: basePrice = Val(dataRange(dataRowIndex, 8))
+            
+            If baseQty > 0 And basePrice > 0 Then
+                ' Normal items with sales
+                baselineValues(currentRow & "_QTY") = Round(baseQty, 2)
+                baselineValues(currentRow & "_PRICE") = Round(basePrice, 2)
+                
+                ' Store data in dictionary with dynamic column detection
+                ' Look for the new columns if they exist
+                Dim sparseDataCol As Long: sparseDataCol = 0
+                Dim monthsSinceCol As Long: monthsSinceCol = 0
+                Dim totalQtyCol As Long: totalQtyCol = 0
+                
+                ' Find column positions (they might be 30, 31, 32 or different)
+                Dim colIdx As Long
+                For colIdx = 1 To UBound(dataRange, 2)
+                    If colIdx = 1 Then
+                        ' SKU column
+                    ElseIf InStr(1, CStr(dataRange(1, colIdx)), "SparseData", vbTextCompare) > 0 Then
+                        sparseDataCol = colIdx
+                    ElseIf InStr(1, CStr(dataRange(1, colIdx)), "MonthsSinceFirstSale", vbTextCompare) > 0 Then
+                        monthsSinceCol = colIdx
+                    ElseIf InStr(1, CStr(dataRange(1, colIdx)), "TotalQtySold", vbTextCompare) > 0 Then
+                        totalQtyCol = colIdx
+                    End If
+                Next colIdx
+                
+                ' Build array with or without sparse data columns
+                If sparseDataCol > 0 And monthsSinceCol > 0 And totalQtyCol > 0 Then
+                    ' Full data including sparse columns and new confidence metrics
+                    dataDict(skuUpper) = Array( _
+                        baseQty, basePrice, _
+                        Val(dataRange(dataRowIndex, 9)), _
+                        Val(dataRange(dataRowIndex, 11)), _
+                        Val(dataRange(dataRowIndex, 12)), _
+                        Val(dataRange(dataRowIndex, 13)), _
+                        Val(dataRange(dataRowIndex, 14)), _
+                        Val(dataRange(dataRowIndex, 16)), _
+                        Val(dataRange(dataRowIndex, 18)), Val(dataRange(dataRowIndex, 19)), Val(dataRange(dataRowIndex, 20)), Val(dataRange(dataRowIndex, 21)), _
+                        Val(dataRange(dataRowIndex, 22)), Val(dataRange(dataRowIndex, 23)), Val(dataRange(dataRowIndex, 24)), _
+                        Val(dataRange(dataRowIndex, 25)), Val(dataRange(dataRowIndex, 26)), Val(dataRange(dataRowIndex, 27)), _
+                        Val(dataRange(dataRowIndex, 28)), Val(dataRange(dataRowIndex, 29)), _
+                        IIf(UCase(dataRange(dataRowIndex, sparseDataCol)) = "TRUE", True, False), _
+                        Val(dataRange(dataRowIndex, monthsSinceCol)), _
+                        Val(dataRange(dataRowIndex, totalQtyCol)), _
+                        IIf(UBound(dataRange, 2) >= 32, Val(dataRange(dataRowIndex, 32)), 0.8), _
+                        IIf(UBound(dataRange, 2) >= 33, Val(dataRange(dataRowIndex, 33)), 1#) _
+                    )
+                                    Else
+                        ' Basic data without sparse columns (backward compatibility)
+                        dataDict(skuUpper) = Array( _
+                            baseQty, basePrice, _
+                            Val(dataRange(dataRowIndex, 9)), _
+                            Val(dataRange(dataRowIndex, 11)), _
+                            Val(dataRange(dataRowIndex, 12)), _
+                            Val(dataRange(dataRowIndex, 13)), _
+                            Val(dataRange(dataRowIndex, 14)), _
+                            Val(dataRange(dataRowIndex, 16)), _
+                            Val(dataRange(dataRowIndex, 18)), Val(dataRange(dataRowIndex, 19)), Val(dataRange(dataRowIndex, 20)), Val(dataRange(dataRowIndex, 21)), _
+                            Val(dataRange(dataRowIndex, 22)), Val(dataRange(dataRowIndex, 23)), Val(dataRange(dataRowIndex, 24)), _
+                            Val(dataRange(dataRowIndex, 25)), Val(dataRange(dataRowIndex, 26)), Val(dataRange(dataRowIndex, 27)), _
+                            Val(dataRange(dataRowIndex, 28)), Val(dataRange(dataRowIndex, 29)), _
+                            False, 1, 0, 0.8, 1# _
+                        )
+                End If
+                formatRanges(currentRow) = True
+            Else
+                ' Low/no sales items
+                baselineValues(currentRow & "_QTY") = "No Sales Data"
+                baselineValues(currentRow & "_PRICE") = "No Run Rate"
+                formatRanges(currentRow) = False
+            End If
+        Else
+            ' SKU not in data
+            baselineValues(currentRow & "_QTY") = "SKU Not Found"
+            baselineValues(currentRow & "_PRICE") = "-"
+            formatRanges(currentRow) = False
+        End If
+        
+        currentRow = currentRow + 1
+    Next sku
+    
+    ' PERFORMANCE: Batch write all baseline values
+    currentRow = SKU_START_ROW
+    For Each sku In skuList
+        ws.Cells(currentRow, BASELINE_QTY_COL).Value = baselineValues(currentRow & "_QTY")
+        ws.Cells(currentRow, BASELINE_PRICE_COL).Value = baselineValues(currentRow & "_PRICE")
+
+        If formatRanges(currentRow) Then
+            ' Format baseline cells for items with data
+            ws.Cells(currentRow, BASELINE_QTY_COL).NumberFormat = "0.00"
+            ws.Cells(currentRow, BASELINE_PRICE_COL).NumberFormat = "£0.00"
+            ws.Range(ws.Cells(currentRow, BASELINE_QTY_COL), ws.Cells(currentRow, BASELINE_PRICE_COL)).Interior.color = RGB(242, 242, 242)
+        Else
+            ' Format for no data items
+            ws.Range(ws.Cells(currentRow, BASELINE_QTY_COL), ws.Cells(currentRow, BASELINE_PRICE_COL)).Interior.color = RGB(250, 250, 250)
+            ws.Range(ws.Cells(currentRow, BASELINE_QTY_COL), ws.Cells(currentRow, BASELINE_PRICE_COL)).Font.Italic = True
+            ws.Range(ws.Cells(currentRow, BASELINE_QTY_COL), ws.Cells(currentRow, BASELINE_PRICE_COL)).Font.color = RGB(128, 128, 128)
+        End If
+        currentRow = currentRow + 1
+    Next sku
+    
+    ' PERFORMANCE: Memory cleanup
+    Set dataLookup = Nothing
+    Set baselineValues = Nothing
+    Set formatRanges = Nothing
+    On Error GoTo 0
+End Sub
+
+Private Sub LoadExistingPromosEnhanced(skuList As Collection)
+    ' Try to load existing promos from PromoRows Power Query
+    If LoadPromosFromPowerQueryFixed(skuList) Then
+        Exit Sub
+    End If
+    
+    ' Fallback: Load from PromoRows worksheet if available
+    On Error Resume Next
+    Dim promoWs As Worksheet: Set promoWs = ThisWorkbook.Worksheets("PromoRows")
+    On Error GoTo 0
+    
+    If promoWs Is Nothing Then
+        Exit Sub
+    End If
+    
+    LoadExistingPromosFromTable skuList
+End Sub
+
+Private Sub CalculateEnhancedForecastsForAllSKUs(skuList As Collection)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    ' PERFORMANCE: Prepare batch arrays for writing
+    Dim qtyValues As Object: Set qtyValues = CreateObject("Scripting.Dictionary")
+    Dim revValues As Object: Set revValues = CreateObject("Scripting.Dictionary")
+    Dim qtyFormats As Object: Set qtyFormats = CreateObject("Scripting.Dictionary")
+    Dim revFormats As Object: Set revFormats = CreateObject("Scripting.Dictionary")
+    Dim qtyColors As Object: Set qtyColors = CreateObject("Scripting.Dictionary")
+    Dim revColors As Object: Set revColors = CreateObject("Scripting.Dictionary")
+    
+    Dim currentRow As Long: currentRow = SKU_START_ROW
+    Dim processedCount As Long: processedCount = 0
+    
+    Dim sku As Variant
+    For Each sku In skuList
+        ' PERFORMANCE: Single dictionary lookup with error handling
+        Dim cachedData As Variant
+        On Error Resume Next
+        cachedData = dataDict(UCase(sku))
+        If Err.Number = 0 And IsArray(cachedData) Then
+            ' Only calculate if we have valid numeric data
+            If IsNumeric(cachedData(IDX_BASE_QTY)) And cachedData(IDX_BASE_QTY) > 0 Then
+                CalculateEnhancedForecastForSingleSKUBatch currentRow, UCase(sku), cachedData, qtyValues, revValues, qtyFormats, revFormats, qtyColors, revColors
+            Else
+                ' Mark as no forecast available
+                Dim monthIndex As Long
+                For monthIndex = 0 To 11
+                    Dim qtyCol As Long: qtyCol = FORECAST_QTY_START_COL + monthIndex
+                    Dim revCol As Long: revCol = FORECAST_REV_START_COL + monthIndex
+                    qtyValues(currentRow & "_" & qtyCol) = "-"
+                    revValues(currentRow & "_" & revCol) = "-"
+                    qtyColors(currentRow & "_" & qtyCol) = RGB(250, 250, 250)
+                    revColors(currentRow & "_" & revCol) = RGB(250, 250, 250)
+                Next monthIndex
+            End If
+        End If
+        On Error GoTo 0
+        
+        currentRow = currentRow + 1
+        processedCount = processedCount + 1
+        
+        ' PERFORMANCE: Progress update and memory management every 100 SKUs
+        If processedCount Mod 100 = 0 Then
+            DoEvents
+            ' Periodic memory cleanup for very large datasets
+            If processedCount Mod 1000 = 0 Then
+                Application.StatusBar = "Processing SKU " & processedCount & " of " & skuList.Count
+            End If
+        End If
+    Next sku
+    
+    ' PERFORMANCE: Batch write all values at once
+    WriteBatchResults ws, qtyValues, revValues, qtyFormats, revFormats, qtyColors, revColors
+    
+    ' PERFORMANCE: Memory cleanup
+    Set qtyValues = Nothing
+    Set revValues = Nothing
+    Set qtyFormats = Nothing
+    Set revFormats = Nothing
+    Set qtyColors = Nothing
+    Set revColors = Nothing
+    
+    Application.StatusBar = False
+End Sub
+
+Private Sub CalculateEnhancedForecastForSingleSKUBatch(targetRow As Long, sku As String, cachedData As Variant, _
+    qtyValues As Object, revValues As Object, qtyFormats As Object, revFormats As Object, _
+    qtyColors As Object, revColors As Object)
+    
+    Dim baselineQty As Double: baselineQty = cachedData(IDX_BASE_QTY)
+    Dim baselinePrice As Double: baselinePrice = cachedData(IDX_BASE_PRICE)
+    Dim qualityScore As Double: qualityScore = cachedData(IDX_QUALITY)
+    Dim priceElasticity As Double: priceElasticity = cachedData(IDX_PRICE_ELASTICITY)
+    
+    ' NEW: Check for sparse data with safety
+    Dim isSparseData As Boolean: isSparseData = False
+    Dim monthsSinceFirst As Double: monthsSinceFirst = 1
+    Dim totalQtySold As Double: totalQtySold = 0
+    
+    On Error Resume Next
+    If UBound(cachedData) >= IDX_SPARSE_DATA Then
+        isSparseData = cachedData(IDX_SPARSE_DATA)
+    End If
+    If UBound(cachedData) >= IDX_MONTHS_SINCE_FIRST Then
+        monthsSinceFirst = cachedData(IDX_MONTHS_SINCE_FIRST)
+    End If
+    If UBound(cachedData) >= IDX_TOTAL_QTY_SOLD Then
+        totalQtySold = cachedData(IDX_TOTAL_QTY_SOLD)
+    End If
+    On Error GoTo 0
+    
+    ' PERFORMANCE: Early exit for invalid data
+    If baselineQty <= 0 Or baselinePrice <= 0 Then Exit Sub
+    
+    ' Calculate for each month
+    Dim monthIndex As Long
+    For monthIndex = 0 To 11
+        Dim qtyCol As Long: qtyCol = FORECAST_QTY_START_COL + monthIndex
+        Dim revCol As Long: revCol = FORECAST_REV_START_COL + monthIndex
+        
+        ' Use proper monthly calculation from daily baseline
+        Dim monthlyQty As Double: monthlyQty = baselineQty * 30.44
+        
+        ' NEW: Apply conservative adjustment for sparse data items
+        If isSparseData And monthsSinceFirst > 3 Then
+            ' For sparse items, cap the monthly forecast based on historical monthly average
+            Dim historicalMonthlyAvg As Double: historicalMonthlyAvg = totalQtySold / monthsSinceFirst
+            If monthlyQty > historicalMonthlyAvg * 2 Then
+                monthlyQty = historicalMonthlyAvg * 1.2  ' Allow 20% growth max
+            End If
+        End If
+        
+        ' Apply seasonality with reasonable bounds
+        Dim seasonality As Double: seasonality = cachedData(IDX_MONTH1 + monthIndex)
+        If seasonality <= 0 Then seasonality = 1
+        
+        ' MORE conservative seasonality for sparse items
+        If isSparseData Then
+            If seasonality < 0.8 Then seasonality = 0.8
+            If seasonality > 1.2 Then seasonality = 1.2
+        Else
+            If seasonality < 0.7 Then seasonality = 0.7
+            If seasonality > 1.5 Then seasonality = 1.5
+        End If
+        
+        Dim afterSeasonality As Double: afterSeasonality = monthlyQty * seasonality
+        
+        ' Quality adjustment - more conservative for sparse data
+        Dim qualityAdjustment As Double
+        If isSparseData Then
+            qualityAdjustment = 0.8 + (qualityScore * 0.1)  ' Range: 0.8 to 0.9
+        Else
+            qualityAdjustment = 0.9 + (qualityScore * 0.1)  ' Range: 0.9 to 1.0
+        End If
+        Dim afterQuality As Double: afterQuality = afterSeasonality * qualityAdjustment
+        
+        ' Apply promo lifts - reduced effect for sparse items
+        Dim totalLift As Double: totalLift = CalculatePromoLiftsFromSheetEnhanced(targetRow, monthIndex, cachedData)
+        If isSparseData And totalLift > 0 Then
+            totalLift = totalLift * 0.5  ' Reduce promo effect by 50% for sparse items
+        End If
+        
+        ' Final calculation
+        Dim finalQty As Double: finalQty = afterQuality
+        Dim cellColor As Long
+        
+        If totalLift > 0 Then
+            finalQty = afterQuality * (1 + totalLift)
+            ' Cap maximum lift
+            If isSparseData Then
+                If finalQty > baselineQty * 30.44 * seasonality * 2 Then
+                    finalQty = baselineQty * 30.44 * seasonality * 2
+                End If
+            Else
+                If finalQty > baselineQty * 30.44 * seasonality * 5 Then
+                    finalQty = baselineQty * 30.44 * seasonality * 5
+                End If
+            End If
+            cellColor = RGB(255, 242, 204)
+        Else
+            cellColor = RGB(235, 241, 222)
+        End If
+        
+        ' Calculate revenue
+        Dim monthlyRevenue As Double: monthlyRevenue = finalQty * baselinePrice
+        
+        ' PERFORMANCE: Store values in batch arrays instead of writing directly
+        ' Use decimal precision to preserve revenue for low-volume items
+        qtyValues(targetRow & "_" & qtyCol) = Round(finalQty, 2)
+        revValues(targetRow & "_" & revCol) = Round(monthlyRevenue, 2)
+        
+        qtyFormats(targetRow & "_" & qtyCol) = "#,##0.00"
+        revFormats(targetRow & "_" & revCol) = "£#,##0.00"
+        qtyColors(targetRow & "_" & qtyCol) = cellColor
+        revColors(targetRow & "_" & revCol) = IIf(totalLift > 0, RGB(255, 242, 204), RGB(221, 235, 247))
+    Next monthIndex
+End Sub
+
+Private Function CalculatePromoLiftsFromSheetEnhanced(targetRow As Long, monthIndex As Long, cachedData As Variant) As Double
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    Dim totalLift As Double: totalLift = 0
+    
+    ' Check all 3 promo slots for this month
+    Dim promoSlot As Long
+    For promoSlot = 1 To PROMOS_PER_MONTH
+        Dim promoStartCol As Long: promoStartCol = PROMO_START_COL + (monthIndex * PROMOS_PER_MONTH * PROMO_COLS_PER_SLOT) + ((promoSlot - 1) * PROMO_COLS_PER_SLOT)
+        
+        Dim promoType As String: promoType = Trim(ws.Cells(targetRow, promoStartCol).Value)
+        Dim promoValueText As String: promoValueText = Trim(ws.Cells(targetRow, promoStartCol + 1).Value)
+        Dim startDateText As String: startDateText = Trim(ws.Cells(targetRow, promoStartCol + 2).Value)
+        Dim endDateText As String: endDateText = Trim(ws.Cells(targetRow, promoStartCol + 3).Value)
+        
+        If promoType <> "" And promoType <> "None" And promoValueText <> "" Then
+            ' Parse the promo value
+            Dim promoValue As Double: promoValue = ParsePromoValue(promoValueText)
+            
+            ' Calculate duration factor if dates are provided
+            Dim durationFactor As Double: durationFactor = 1#
+            If startDateText <> "" And endDateText <> "" Then
+                durationFactor = CalculateDurationFactor(startDateText, endDateText, monthIndex)
+            End If
+            
+            If promoValue > 0 And durationFactor > 0 Then
+                ' Pass price elasticity for more accurate promo lift calculation
+                Dim promoLift As Double: promoLift = CalculatePromoLiftWithElasticity(promoType, promoValue, durationFactor, cachedData)
+                totalLift = totalLift + promoLift
+            End If
+        End If
+    Next promoSlot
+    
+    CalculatePromoLiftsFromSheetEnhanced = totalLift
+End Function
+
+Private Function CalculatePromoLiftWithElasticity(promoType As String, promoValue As Double, _
+    durationFactor As Double, cachedData As Variant) As Double
+    
+    ' Get pre-calculated lift from PromoROI
+    Dim baseLift As Double
+    Select Case UCase(Trim(promoType))
+        Case "STRIKE-THROUGH": baseLift = cachedData(IDX_LIFT_STRIKE)
+        Case "COUPON": baseLift = cachedData(IDX_LIFT_COUPON)
+        Case "NON-STRIKE-THROUGH": baseLift = cachedData(IDX_LIFT_NONSTRIKE)
+        Case "RRP": baseLift = cachedData(IDX_LIFT_RRP)
+        Case "BOGOF": baseLift = 0.5  ' Special case
+        Case "BUNDLE": baseLift = 0.3
+        Case "FLASH": baseLift = 0.4
+        Case Else: baseLift = 0.15
+    End Select
+    
+    ' Apply discount depth adjustment
+    Dim depthMultiplier As Double
+    If promoValue < 1 Then
+        ' Percentage discount: higher discount = higher lift
+        depthMultiplier = 1 + (promoValue * 1.5)  ' 20% off = 1.3x multiplier
+    Else
+        ' Absolute discount: use tiered multiplier
+        Dim discountPct As Double
+        If cachedData(IDX_BASE_PRICE) > 0 Then
+            discountPct = promoValue / cachedData(IDX_BASE_PRICE)
+        Else
+            discountPct = 0.1  ' Default 10%
+        End If
+        depthMultiplier = 1 + (discountPct * 1.5)
+    End If
+    
+    ' Final calculation with cap
+    Dim finalLift As Double
+    finalLift = baseLift * depthMultiplier * durationFactor
+    
+    ' Cap based on elasticity
+    Dim maxLift As Double
+    Dim elasticity As Double: elasticity = cachedData(IDX_PRICE_ELASTICITY)
+    maxLift = 1 + (elasticity * 0.5)  ' Max lift = 1 + half of elasticity
+    
+    If finalLift > maxLift Then finalLift = maxLift
+    
+    CalculatePromoLiftWithElasticity = finalLift
+End Function
+
+' BACKUP: Keep original function for fallback and compatibility
+Private Function CalculatePromoLiftEnhanced(promoType As String, promoValue As Double, durationFactor As Double, cachedData As Variant) As Double
+    Dim baseLift As Double
+    
+    ' Base lift percentages by promo type using cached data
+    Select Case UCase(Trim(promoType))
+        Case "STRIKE-THROUGH": baseLift = cachedData(IDX_LIFT_STRIKE)
+        Case "COUPON": baseLift = cachedData(IDX_LIFT_COUPON)
+        Case "NON-STRIKE-THROUGH": baseLift = cachedData(IDX_LIFT_NONSTRIKE)
+        Case "RRP": baseLift = cachedData(IDX_LIFT_RRP)
+        Case "BOGOF": baseLift = 0.5
+        Case "BUNDLE": baseLift = 0.3
+        Case "FLASH": baseLift = 0.4
+        Case Else: baseLift = 0.15  ' Default lift
+    End Select
+    
+    ' Adjust base lift by promo value
+    Dim valueFactor As Double
+    If promoValue < 1 Then
+        ' Percentage discount - scale the lift by the discount percentage
+        valueFactor = 1 + (promoValue * 2)  ' 20% discount = 1.4x base lift
+    Else
+        ' Absolute value - use standard multiplier based on magnitude
+        If promoValue <= 5 Then
+            valueFactor = 1.2
+        ElseIf promoValue <= 10 Then
+            valueFactor = 1.5
+        Else
+            valueFactor = 2#
+        End If
+    End If
+    
+    ' Calculate final lift: base * value factor * duration factor
+    CalculatePromoLiftEnhanced = baseLift * valueFactor * durationFactor
+    
+    ' Cap maximum lift at 300%
+    If CalculatePromoLiftEnhanced > 3 Then CalculatePromoLiftEnhanced = 3
+End Function
+
+Private Sub ClearForecastDataEnhanced()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    ' Clear everything EXCEPT Column B (SKUs) and Column A (row numbers)
+    ' Clear forecast data (Columns C onwards)
+    With ws.Range("C8:ZZ50000")
+        .ClearContents
+        .Interior.color = xlNone
+    End With
+End Sub
+
+Private Sub AddEnhancedSummary(skuCount As Long)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    Dim summaryRow As Long: summaryRow = SKU_START_ROW + skuCount + 3
+    
+    ' Summary headers
+    ws.Cells(summaryRow, 1).Value = "TOTALS"
+    ws.Cells(summaryRow, 1).Font.Bold = True
+    ws.Cells(summaryRow, 1).Interior.color = RGB(0, 102, 204)
+    ws.Cells(summaryRow, 1).Font.color = RGB(255, 255, 255)
+    
+    ' Calculate monthly totals
+    Dim monthIndex As Long
+    For monthIndex = 0 To 11
+        Dim qtyCol As Long: qtyCol = FORECAST_QTY_START_COL + monthIndex
+        Dim revCol As Long: revCol = FORECAST_REV_START_COL + monthIndex
+        
+        ' Quantity totals
+        Dim qtyFormula As String: qtyFormula = "=SUM(" & ws.Cells(SKU_START_ROW, qtyCol).Address & ":" & ws.Cells(SKU_START_ROW + skuCount - 1, qtyCol).Address & ")"
+        ws.Cells(summaryRow, qtyCol).Formula = qtyFormula
+        ws.Cells(summaryRow, qtyCol).NumberFormat = "#,##0"
+        ws.Cells(summaryRow, qtyCol).Font.Bold = True
+        ws.Cells(summaryRow, qtyCol).Interior.color = RGB(255, 242, 204)
+        
+        ' Revenue totals
+        Dim revFormula As String: revFormula = "=SUM(" & ws.Cells(SKU_START_ROW, revCol).Address & ":" & ws.Cells(SKU_START_ROW + skuCount - 1, revCol).Address & ")"
+        ws.Cells(summaryRow, revCol).Formula = revFormula
+        ws.Cells(summaryRow, revCol).NumberFormat = "£#,##0"
+        ws.Cells(summaryRow, revCol).Font.Bold = True
+        ws.Cells(summaryRow, revCol).Interior.color = RGB(255, 242, 204)
+    Next monthIndex
+    
+    ' Summary info
+    ws.Cells(summaryRow + 2, 1).Value = "SKUs Processed:"
+    ws.Cells(summaryRow + 2, 2).Value = skuCount
+    ws.Cells(summaryRow + 3, 1).Value = "Last Updated:"
+    ws.Cells(summaryRow + 3, 2).Value = Format(Now, "dd/mm/yyyy hh:mm")
+    ws.Cells(summaryRow + 4, 1).Value = "Data Source:"
+    ws.Cells(summaryRow + 4, 2).Value = "Enhanced Calculation Engine"
+End Sub
+
+Private Sub RefreshSingleSKUEnhanced(targetRow As Long)
+    ' Enhanced single SKU refresh with effective promo calculations
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    ' Ensure data is loaded
+    If dataDict Is Nothing Then
+        Exit Sub
+    End If
+    
+    ' Get SKU from the target row
+    Dim sku As String: sku = UCase(Trim(ws.Cells(targetRow, SKU_COL).Value))
+    
+    If sku = "" Or sku = "PASTE SKUs here..." Then
+        Exit Sub
+    End If
+    
+    On Error Resume Next
+    Dim testData As Variant: testData = dataDict(sku)
+    If Err.Number <> 0 Or Not IsArray(testData) Then
+        ' No data for this SKU - clear forecast cells
+        Dim i As Long
+        For i = 0 To 11
+            ws.Cells(targetRow, FORECAST_QTY_START_COL + i).Value = "-"
+            ws.Cells(targetRow, FORECAST_REV_START_COL + i).Value = "-"
+        Next i
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    Application.ScreenUpdating = False
+    
+    ' Calculate enhanced forecast for this single SKU
+    CalculateEnhancedForecastForSingleSKU targetRow, sku
+    
+    Application.ScreenUpdating = True
+End Sub
+
+Sub RefreshSingleSKU(targetRow As Long)
+    ' Public wrapper for worksheet event handlers to call
+    RefreshSingleSKUEnhanced targetRow
+End Sub
+
+Sub RecalculateSingleSKUForecast(targetRow As Long)
+    ' Compatibility function for existing worksheet events
+    RefreshSingleSKU targetRow
+End Sub
+
+Private Function LoadDataFromPowerQueryConnections() As Boolean
+    ' ULTRA-FAST: Load directly from Power Query connections using temporary worksheets
+    On Error GoTo ErrorHandler
+    
+    Dim forecastLoaded As Boolean: forecastLoaded = False
+    Dim seasonalityLoaded As Boolean: seasonalityLoaded = False
+    
+    ' Create temporary worksheets to load connection data
+    Application.ScreenUpdating = False
+    
+    ' Load ForecastData
+    Dim tempForecastWs As Worksheet
+    Set tempForecastWs = CreateTempWorksheetFromConnection("ForecastData")
+    If Not tempForecastWs Is Nothing Then
+        forecastLoaded = LoadForecastDataFromTempSheet(tempForecastWs)
+        Application.DisplayAlerts = False
+        tempForecastWs.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+    ' Load SeasonalityData
+    Dim tempSeasonWs As Worksheet
+    Set tempSeasonWs = CreateTempWorksheetFromConnection("SeasonalityData")
+    If Not tempSeasonWs Is Nothing Then
+        seasonalityLoaded = LoadSeasonalityDataFromTempSheet(tempSeasonWs)
+        Application.DisplayAlerts = False
+        tempSeasonWs.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+    Application.ScreenUpdating = True
+    
+    ' Return true only if both datasets loaded successfully
+    LoadDataFromPowerQueryConnections = (forecastLoaded And seasonalityLoaded)
+    
+    Exit Function
+
+ErrorHandler:
+    Application.ScreenUpdating = True
+    LoadDataFromPowerQueryConnections = False
+End Function
+
+Private Function CreateTempWorksheetFromConnection(connectionName As String) As Worksheet
+    On Error GoTo ErrorHandler
+    
+    Dim conn As WorkbookConnection
+    
+    ' Find the connection
+    For Each conn In ThisWorkbook.Connections
+        If InStr(UCase(conn.Name), UCase(connectionName)) > 0 Then
+            
+            ' Create temporary worksheet
+            Dim tempWs As Worksheet
+            Set tempWs = ThisWorkbook.Worksheets.Add
+            tempWs.Name = "Temp_" & connectionName & "_" & Format(Now, "hhmmss")
+            
+            ' Load data to temporary worksheet using QueryTable
+            Dim qt As queryTable
+            Set qt = tempWs.QueryTables.Add(Connection:=conn, Destination:=tempWs.Range("A1"))
+            With qt
+                .BackgroundQuery = False
+                .RefreshOnFileOpen = False
+                .Refresh
+            End With
+            
+            ' Check if data was loaded
+            Dim lastRow As Long: lastRow = tempWs.Cells(tempWs.Rows.Count, 1).End(xlUp).row
+            
+            Set CreateTempWorksheetFromConnection = tempWs
+            Exit Function
+        End If
+    Next conn
+
+ErrorHandler:
+    Set CreateTempWorksheetFromConnection = Nothing
+End Function
+
+Private Function LoadForecastDataFromTempSheet(ws As Worksheet) As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then
+        Exit Function
+    End If
+    
+    ' Expand range to handle more columns if needed
+    Dim lastCol As Long: lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If lastCol > 26 Then lastCol = 26  ' Cap at column Z for safety
+    Dim dataArr As Variant: dataArr = ws.Range("A1:" & Chr(64 + lastCol) & lastRow).Value
+    
+    ' Find column indices (first row should be headers)
+    Dim skuCol As Long, baselineQtyCol As Long, baselinePriceCol As Long, qualityCol As Long
+    Dim month1Col As Long, month2Col As Long, month3Col As Long, month4Col As Long
+    Dim month5Col As Long, month6Col As Long, month7Col As Long, month8Col As Long
+    Dim month9Col As Long, month10Col As Long, month11Col As Long, month12Col As Long
+    Dim strikeLiftCol As Long, couponLiftCol As Long, nonStrikeLiftCol As Long, rrpLiftCol As Long, priceElasticityCol As Long
+    
+    Dim i As Long
+    For i = 1 To UBound(dataArr, 2)
+        If i <= UBound(dataArr, 2) Then  ' Safety check
+            Dim headerName As String: headerName = UCase(Trim(CStr(dataArr(1, i))))
+            
+            Select Case headerName
+                Case "SKU": skuCol = i
+                Case "BASELINEQTY": baselineQtyCol = i
+                Case "BASELINEPRICE": baselinePriceCol = i
+                Case "QUALITYSCORE": qualityCol = i
+                Case "MONTH1": month1Col = i
+                Case "MONTH2": month2Col = i
+                Case "MONTH3": month3Col = i
+                Case "MONTH4": month4Col = i
+                Case "MONTH5": month5Col = i
+                Case "MONTH6": month6Col = i
+                Case "MONTH7": month7Col = i
+                Case "MONTH8": month8Col = i
+                Case "MONTH9": month9Col = i
+                Case "MONTH10": month10Col = i
+                Case "MONTH11": month11Col = i
+                Case "MONTH12": month12Col = i
+                Case "STRIKE-THROUGHLIFT": strikeLiftCol = i
+                Case "COUPONLIFT": couponLiftCol = i
+                Case "NONSTRIKETHROUGHLIFT": nonStrikeLiftCol = i
+                Case "RRPLIFT": rrpLiftCol = i
+                Case "PRICEELASTICITY": priceElasticityCol = i
+            End Select
+        End If
+    Next i
+    
+    ' Load data if all essential columns found
+    If skuCol > 0 And baselineQtyCol > 0 And baselinePriceCol > 0 And qualityCol > 0 And month1Col > 0 Then
+        For i = 2 To UBound(dataArr, 1)
+            Dim sku As String: sku = UCase(Trim(CStr(dataArr(i, skuCol))))
+            If sku <> "" Then
+                ' Store baseline data + seasonality factors from ForecastData
+                dataDict(sku) = Array( _
+                    Val(dataArr(i, baselineQtyCol)), Val(dataArr(i, baselinePriceCol)), Val(dataArr(i, qualityCol)), _
+                    Val(dataArr(i, strikeLiftCol)), Val(dataArr(i, couponLiftCol)), Val(dataArr(i, nonStrikeLiftCol)), Val(dataArr(i, rrpLiftCol)), _
+                    Val(dataArr(i, priceElasticityCol)), _
+                    Val(dataArr(i, month1Col)), Val(dataArr(i, month2Col)), Val(dataArr(i, month3Col)), Val(dataArr(i, month4Col)), _
+                    Val(dataArr(i, month5Col)), Val(dataArr(i, month6Col)), Val(dataArr(i, month7Col)), Val(dataArr(i, month8Col)), _
+                    Val(dataArr(i, month9Col)), Val(dataArr(i, month10Col)), Val(dataArr(i, month11Col)), Val(dataArr(i, month12Col)) _
+                )
+            End If
+        Next i
+        LoadForecastDataFromTempSheet = True
+    End If
+    
+    Exit Function
+
+ErrorHandler:
+    LoadForecastDataFromTempSheet = False
+End Function
+
+Private Function LoadSeasonalityDataFromTempSheet(ws As Worksheet) As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then Exit Function
+    
+    Dim seasonArr As Variant: seasonArr = ws.Range("A1:M" & lastRow).Value
+    
+    ' Find column indices
+    Dim skuCol As Long
+    Dim janCol As Long, febCol As Long, marCol As Long, aprCol As Long
+    Dim mayCol As Long, junCol As Long, julCol As Long, augCol As Long
+    Dim sepCol As Long, octCol As Long, novCol As Long, decCol As Long
+    
+    Dim i As Long
+    For i = 1 To UBound(seasonArr, 2)
+        Select Case UCase(Trim(CStr(seasonArr(1, i))))
+            Case "SKU": skuCol = i
+            Case "JAN": janCol = i
+            Case "FEB": febCol = i
+            Case "MAR": marCol = i
+            Case "APR": aprCol = i
+            Case "MAY": mayCol = i
+            Case "JUN": junCol = i
+            Case "JUL": julCol = i
+            Case "AUG": augCol = i
+            Case "SEP": sepCol = i
+            Case "OCT": octCol = i
+            Case "NOV": novCol = i
+            Case "DEC": decCol = i
+        End Select
+    Next i
+    
+    ' Load seasonality data if columns found
+    If skuCol > 0 And janCol > 0 Then
+        For i = 2 To UBound(seasonArr, 1)
+            Dim sku As String: sku = UCase(Trim(CStr(seasonArr(i, skuCol))))
+            If sku <> "" Then
+                seasonalityDict(sku) = Array( _
+                    Val(seasonArr(i, janCol)), Val(seasonArr(i, febCol)), Val(seasonArr(i, marCol)), Val(seasonArr(i, aprCol)), _
+                    Val(seasonArr(i, mayCol)), Val(seasonArr(i, junCol)), Val(seasonArr(i, julCol)), Val(seasonArr(i, augCol)), _
+                    Val(seasonArr(i, sepCol)), Val(seasonArr(i, octCol)), Val(seasonArr(i, novCol)), Val(seasonArr(i, decCol)) _
+                )
+            End If
+        Next i
+        LoadSeasonalityDataFromTempSheet = True
+    End If
+    
+    Exit Function
+
+ErrorHandler:
+    LoadSeasonalityDataFromTempSheet = False
+End Function
+
+Private Sub LoadDataFromWorksheets()
+    ' Fallback: Load from ForecastData sheet
+    On Error Resume Next
+    Dim dataWs As Worksheet: Set dataWs = ThisWorkbook.Worksheets("ForecastData")
+    If Not dataWs Is Nothing Then
+        Dim lastRow As Long: lastRow = dataWs.Cells(dataWs.Rows.Count, 1).End(xlUp).row
+        If lastRow > 1 Then
+            ' FIXED: Extended range to AF instead of AC to include new sparse data columns
+            Dim dataArr As Variant: dataArr = dataWs.Range("A1:AF" & lastRow).Value
+            
+            Dim i As Long
+            For i = 2 To UBound(dataArr, 1)
+                Dim sku As String: sku = UCase(Trim(CStr(dataArr(i, 1))))
+                If sku <> "" Then
+                    ' Store essential data with dynamic column detection
+                    ' Look for the new columns if they exist
+                    Dim sparseDataCol As Long: sparseDataCol = 0
+                    Dim monthsSinceCol As Long: monthsSinceCol = 0
+                    Dim totalQtyCol As Long: totalQtyCol = 0
+                    
+                    ' Find column positions in header row
+                    Dim colIdx As Long
+                    For colIdx = 1 To UBound(dataArr, 2)
+                        If colIdx = 1 Then
+                            ' SKU column
+                        ElseIf InStr(1, CStr(dataArr(1, colIdx)), "SparseData", vbTextCompare) > 0 Then
+                            sparseDataCol = colIdx
+                        ElseIf InStr(1, CStr(dataArr(1, colIdx)), "MonthsSinceFirstSale", vbTextCompare) > 0 Then
+                            monthsSinceCol = colIdx
+                        ElseIf InStr(1, CStr(dataArr(1, colIdx)), "TotalQtySold", vbTextCompare) > 0 Then
+                            totalQtyCol = colIdx
+                        End If
+                    Next colIdx
+                    
+                    ' Build array with or without sparse data columns
+                    If sparseDataCol > 0 And monthsSinceCol > 0 And totalQtyCol > 0 Then
+                        ' Full data including sparse columns and new confidence metrics
+                        dataDict(sku) = Array( _
+                            Val(dataArr(i, 6)),  _            ' BaselineQty
+                            Val(dataArr(i, 8)),  _            ' BaselinePrice
+                            Val(dataArr(i, 9)),  _            ' QualityScore
+                            Val(dataArr(i, 11)), _            ' StrikeThroughLift
+                            Val(dataArr(i, 12)), _            ' CouponLift
+                            Val(dataArr(i, 13)), _            ' NonStrikeThroughLift
+                            Val(dataArr(i, 14)), _            ' RRPLift
+                            Val(dataArr(i, 16)), _            ' PriceElasticity
+                            Val(dataArr(i, 18)), Val(dataArr(i, 19)), Val(dataArr(i, 20)), _
+                            Val(dataArr(i, 21)), Val(dataArr(i, 22)), Val(dataArr(i, 23)), _
+                            Val(dataArr(i, 24)), Val(dataArr(i, 25)), Val(dataArr(i, 26)), _
+                            Val(dataArr(i, 27)), Val(dataArr(i, 28)), Val(dataArr(i, 29)), _
+                            IIf(UCase(dataArr(i, sparseDataCol)) = "TRUE", True, False), _
+                            Val(dataArr(i, monthsSinceCol)), _
+                            Val(dataArr(i, totalQtyCol)), _
+                            IIf(UBound(dataArr, 2) >= 32, Val(dataArr(i, 32)), 0.8), _
+                            IIf(UBound(dataArr, 2) >= 33, Val(dataArr(i, 33)), 1.0) _
+                        )
+                    Else
+                        ' Basic data without sparse columns (backward compatibility)
+                        dataDict(sku) = Array( _
+                            Val(dataArr(i, 6)),  _            ' BaselineQty
+                            Val(dataArr(i, 8)),  _            ' BaselinePrice
+                            Val(dataArr(i, 9)),  _            ' QualityScore
+                            Val(dataArr(i, 11)), _            ' StrikeThroughLift
+                            Val(dataArr(i, 12)), _            ' CouponLift
+                            Val(dataArr(i, 13)), _            ' NonStrikeThroughLift
+                            Val(dataArr(i, 14)), _            ' RRPLift
+                            Val(dataArr(i, 16)), _            ' PriceElasticity
+                            Val(dataArr(i, 18)), Val(dataArr(i, 19)), Val(dataArr(i, 20)), _
+                            Val(dataArr(i, 21)), Val(dataArr(i, 22)), Val(dataArr(i, 23)), _
+                            Val(dataArr(i, 24)), Val(dataArr(i, 25)), Val(dataArr(i, 26)), _
+                            Val(dataArr(i, 27)), Val(dataArr(i, 28)), Val(dataArr(i, 29)), _
+                            False, 1, 0, 0.8, 1.0 _
+                        )
+                    End If
+            End If
+            Next i
+        End If
+    End If
+    
+    ' Load from SeasonalityData sheet
+    Dim seasonWs As Worksheet: Set seasonWs = ThisWorkbook.Worksheets("SeasonalityData")
+    If Not seasonWs Is Nothing Then
+        lastRow = seasonWs.Cells(seasonWs.Rows.Count, 1).End(xlUp).row
+        If lastRow > 1 Then
+            Dim seasonArr As Variant: seasonArr = seasonWs.Range("A1:M" & lastRow).Value
+            
+            For i = 2 To UBound(seasonArr, 1)
+                sku = UCase(Trim(CStr(seasonArr(i, 1))))
+                If sku <> "" Then
+                    seasonalityDict(sku) = Array( _
+                        Val(seasonArr(i, 2)), Val(seasonArr(i, 3)), Val(seasonArr(i, 4)), Val(seasonArr(i, 5)), _
+                        Val(seasonArr(i, 6)), Val(seasonArr(i, 7)), Val(seasonArr(i, 8)), Val(seasonArr(i, 9)), _
+                        Val(seasonArr(i, 10)), Val(seasonArr(i, 11)), Val(seasonArr(i, 12)), Val(seasonArr(i, 13)) _
+                    )
+                End If
+            Next i
+        End If
+    End If
+    On Error GoTo 0
+End Sub
+
+' === MAIN CONTROL FUNCTIONS ===
+
+Sub RefreshAll()
+    ' Main refresh function - called by button click
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    On Error GoTo 0
+    
+    If ws Is Nothing Then
+        SetupEnhancedAnalysisSheet
+        Exit Sub
+    End If
+    
+    Dim startTime As Double: startTime = Timer
+    
+    ' Performance settings
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    
+    ' FORCE CLEAR ALL DICTIONARIES BEFORE INITIALIZING
+    Set dataDict = Nothing
+    Set seasonalityDict = Nothing
+    Set skuRowDict = Nothing
+    Set pendingRows = Nothing
+    bulkUpdateMode = False
+    
+    ' PERFORMANCE: Initialize all dictionaries for optimal performance
+    InitializePerformanceDictionaries
+    
+    ' Get SKU list first (before any clearing)
+    Dim skuList As Collection: Set skuList = GetSKUListEnhanced()
+    
+    If skuList.Count = 0 Then
+        MsgBox "No SKUs found in column B. Please paste SKUs starting from row 8.", vbExclamation
+        GoTo Cleanup
+    End If
+
+    ' CLEAR ALL EXISTING DATA INCLUDING PROMOS
+    Application.StatusBar = "Clearing existing data..."
+    ClearForecastDataEnhanced
+    
+    ' Clear promo data explicitly
+    ws.Range(ws.Cells(8, PROMO_START_COL), ws.Cells(50000, PROMO_START_COL + 144)).ClearContents
+    
+    ' Load baseline data
+    Application.StatusBar = "Loading baseline data..."
+    LoadBaselineDataEnhanced skuList
+    
+    ' Load existing promos from Power Query
+    Application.StatusBar = "Loading existing promos..."
+    LoadExistingPromosEnhanced skuList
+    
+    ' Calculate forecasts for all SKUs
+    Application.StatusBar = "Calculating forecasts..."
+    CalculateEnhancedForecastsForAllSKUs skuList
+    
+    ' Add summary
+    AddEnhancedSummary skuList.Count
+    
+    ' PERFORMANCE: Final memory cleanup
+    CleanupMemory
+
+Cleanup:
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.StatusBar = False
+    
+    ' PERFORMANCE: Show completion time
+    If skuList.Count > 0 Then
+        MsgBox "Refresh completed in " & Format(Timer - startTime, "0.00") & " seconds for " & skuList.Count & " SKUs", vbInformation
+        Application.StatusBar = "Ready"
+    End If
+End Sub
+
+Sub LoadExistingPromos()
+    Dim skuList As Collection: Set skuList = GetSKUListEnhanced()
+    If skuList.Count = 0 Then
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    
+    ' Initialize data if not already loaded
+    If dataDict Is Nothing Then
+        Exit Sub
+    End If
+    
+    ' Load existing promos using enhanced method
+    LoadExistingPromosEnhanced skuList
+    
+    ' Recalculate forecasts with loaded promos
+    CalculateEnhancedForecastsForAllSKUs skuList
+    
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+End Sub
+
+Private Sub LoadExistingPromosFromTable(skuList As Collection)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    ' First try to load from Power Query connection
+    If LoadPromosFromPowerQueryFixed(skuList) Then
+        Exit Sub
+    End If
+    
+    ' Fallback: Load promo data from PromoRows worksheet (if it exists)
+    On Error Resume Next
+    Dim promoWs As Worksheet: Set promoWs = ThisWorkbook.Worksheets("PromoRows")
+    On Error GoTo 0
+    
+    If promoWs Is Nothing Then
+        Exit Sub
+    End If
+    
+    ' Find the data range in PromoRows
+    Dim lastRow As Long: lastRow = promoWs.Cells(promoWs.Rows.Count, 1).End(xlUp).row
+    
+    If lastRow <= 1 Then
+        Exit Sub
+    End If
+    
+    ' Read all promo data at once for performance
+    Dim promoData As Variant: promoData = promoWs.Range("A1:M" & lastRow).Value
+    
+    ' Find column indices (assuming first row is headers)
+    Dim skuCol As Long, discountTypeCol As Long, discountAmtCol As Long
+    Dim startDateCol As Long, endDateCol As Long, monthYearCol As Long
+    
+    Dim i As Long
+    For i = 1 To UBound(promoData, 2)
+        Select Case UCase(Trim(CStr(promoData(1, i))))
+            Case "SKU": skuCol = i
+            Case "DISCOUNTTYPE": discountTypeCol = i
+            Case "DISCOUNTAMT": discountAmtCol = i
+            Case "STARTDATE": startDateCol = i
+            Case "ENDDATE": endDateCol = i
+            Case "MONTHYEAR": monthYearCol = i
+        End Select
+    Next i
+    
+    ' Verify we found all required columns
+    If skuCol = 0 Or discountTypeCol = 0 Or discountAmtCol = 0 Or startDateCol = 0 Or endDateCol = 0 Or monthYearCol = 0 Then
+        Exit Sub
+    End If
+    
+    Dim promosLoaded As Long: promosLoaded = 0
+    Dim currentDate As Date: currentDate = Date
+    Dim maxExpectedPromos As Long: maxExpectedPromos = skuList.Count * 12 * PROMOS_PER_MONTH
+    
+    ' Process each promo row
+    For i = 2 To UBound(promoData, 1)
+        ' PERFORMANCE: Early exit if we've loaded enough promos
+        If promosLoaded >= maxExpectedPromos Then Exit For
+        
+        Dim sku As String: sku = UCase(Trim(CStr(promoData(i, skuCol))))
+        Dim promoType As String: promoType = Trim(CStr(promoData(i, discountTypeCol)))
+        Dim promoValue As String: promoValue = Trim(CStr(promoData(i, discountAmtCol)))
+        Dim startDate As String: startDate = Trim(CStr(promoData(i, startDateCol)))
+        Dim endDate As String: endDate = Trim(CStr(promoData(i, endDateCol)))
+        Dim monthYear As String: monthYear = Trim(CStr(promoData(i, monthYearCol)))
+        
+        ' PERFORMANCE: Use O(1) dictionary lookup instead of linear search
+        On Error Resume Next
+        Dim skuRow As Long: skuRow = skuRowDict(sku)
+        On Error GoTo 0
+        
+        If skuRow > 0 Then
+            ' Calculate which month this promo belongs to
+            Dim monthIndex As Long: monthIndex = CalculateMonthIndex(monthYear, currentDate)
+            
+            If monthIndex >= 0 And monthIndex <= 11 Then
+                ' Find the next available promo slot for this month/SKU
+                Dim promoSlot As Long
+                For promoSlot = 1 To PROMOS_PER_MONTH
+                    Dim promoStartCol As Long: promoStartCol = PROMO_START_COL + (monthIndex * PROMOS_PER_MONTH * PROMO_COLS_PER_SLOT) + ((promoSlot - 1) * PROMO_COLS_PER_SLOT)
+                    
+                    ' Check if this slot is empty
+                    If ws.Cells(skuRow, promoStartCol).Value = "" Then
+                        ' Parse original dates
+                        Dim originalStartDate As Date: originalStartDate = ParseUKDate(startDate)
+                        Dim originalEndDate As Date: originalEndDate = ParseUKDate(endDate)
+                        
+                        If originalStartDate > 0 And originalEndDate > 0 Then
+                            ' Split promo by month if needed
+                            Dim splitResult As Variant
+                            splitResult = SplitPromoByMonth(originalStartDate, originalEndDate, monthIndex, currentDate)
+                            
+                            If splitResult(2) Then ' isValid
+                                ws.Cells(skuRow, promoStartCol).Value = promoType
+                                ws.Cells(skuRow, promoStartCol + 1).Value = promoValue
+                                ws.Cells(skuRow, promoStartCol + 2).Value = splitResult(0) ' Adjusted start
+                                ws.Cells(skuRow, promoStartCol + 3).Value = splitResult(1) ' Adjusted end
+                                ws.Cells(skuRow, promoStartCol + 2).NumberFormat = "dd/mm/yyyy"
+                                ws.Cells(skuRow, promoStartCol + 3).NumberFormat = "dd/mm/yyyy"
+                                
+                                ' Add comment showing original dates if split
+                                If splitResult(0) <> originalStartDate Or splitResult(1) <> originalEndDate Then
+                                    SafeAddComment ws.Cells(skuRow, promoStartCol), _
+                                        "Original: " & Format(originalStartDate, "dd/mm/yyyy") & _
+                                        " - " & Format(originalEndDate, "dd/mm/yyyy")
+                                End If
+                                
+                                promosLoaded = promosLoaded + 1
+                                Exit For
+                            End If
+                        End If
+                    End If
+                Next promoSlot
+            End If
+        End If
+        
+        ' PERFORMANCE: Progress update and memory management every 1000 records
+        If (i - 1) Mod 1000 = 0 Then
+            DoEvents
+            Application.StatusBar = "Loading promos... " & promosLoaded & " loaded"
+        End If
+    Next i
+    
+    Application.StatusBar = False
+    
+    ' Recalculate forecasts with loaded promos
+    CalculateEnhancedForecastsForAllSKUs skuList
+End Sub
+
+Private Function CalculateMonthIndex(monthYear As String, currentDate As Date) As Long
+    ' Convert YYYYMM format to month index (0-11 relative to current month)
+    If Len(monthYear) <> 6 Then
+        CalculateMonthIndex = -1
+        Exit Function
+    End If
+    
+    Dim promoYear As Long: promoYear = Val(Left(monthYear, 4))
+    Dim promoMonth As Long: promoMonth = Val(Right(monthYear, 2))
+    
+    ' FIXED: Use the first day of current month as reference to ensure consistency
+    Dim referenceDate As Date: referenceDate = DateSerial(Year(currentDate), Month(currentDate), 1)
+    Dim promoDate As Date: promoDate = DateSerial(promoYear, promoMonth, 1)
+    
+    ' Calculate months difference from the reference date
+    Dim monthDiff As Long: monthDiff = DateDiff("m", referenceDate, promoDate)
+    
+    ' Return index if within our 12-month forecast window
+    If monthDiff >= 0 And monthDiff <= 11 Then
+        CalculateMonthIndex = monthDiff
+    Else
+        CalculateMonthIndex = -1
+    End If
+End Function
+
+Sub ClearAllData()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    Application.ScreenUpdating = False
+    
+    ws.Range("A8:ZZ50000").ClearContents
+    ws.Range("A8:ZZ50000").Interior.color = xlNone
+    
+    ws.Range("A8").Value = "1"
+    ws.Range("B8").Value = "Paste SKUs here..."
+    ws.Range("B8").Interior.color = RGB(255, 255, 0)
+    
+    ' PERFORMANCE: Clear all performance dictionaries
+    Set dataDict = Nothing
+    Set seasonalityDict = Nothing
+    Set skuRowDict = Nothing
+    
+    Application.ScreenUpdating = True
+End Sub
+
+' PERFORMANCE: Memory management helper function
+Private Sub CleanupMemory()
+    ' Force garbage collection for large datasets
+    Dim i As Long
+    For i = 1 To 3
+        DoEvents
+    Next i
+End Sub
+
+' PERFORMANCE: Initialize all dictionaries at once
+Private Sub InitializePerformanceDictionaries()
+    If dataDict Is Nothing Then Set dataDict = CreateObject("Scripting.Dictionary")
+    If seasonalityDict Is Nothing Then Set seasonalityDict = CreateObject("Scripting.Dictionary")
+    If skuRowDict Is Nothing Then Set skuRowDict = CreateObject("Scripting.Dictionary")
+    
+    dataDict.RemoveAll
+    seasonalityDict.RemoveAll
+    skuRowDict.RemoveAll
+End Sub
+
+Private Function ParsePromoValue(promoValueText As String) As Double
+    ' Parse promo value from text like "20%", "£5", "5.00", etc.
+    Dim cleanValue As String: cleanValue = UCase(Trim(promoValueText))
+    
+    ' Remove currency symbols and % signs
+    cleanValue = Replace(cleanValue, "£", "")
+    cleanValue = Replace(cleanValue, "$", "")
+    cleanValue = Replace(cleanValue, "%", "")
+    cleanValue = Replace(cleanValue, "€", "")
+    
+    ' Convert to number
+    ParsePromoValue = Val(cleanValue)
+    
+    ' If original text contained %, treat as percentage (e.g., 0.2 = 20% off)
+    If InStr(promoValueText, "%") > 0 Then
+        ParsePromoValue = ParsePromoValue / 100
+    End If
+End Function
+
+Private Function CalculateDurationFactor(startDateText As String, endDateText As String, monthIndex As Long) As Double
+    ' Calculate what fraction of the month this promo runs
+    On Error GoTo ErrorHandler
+    
+    Dim startDate As Date, endDate As Date
+    Dim currentDate As Date: currentDate = Date
+    Dim targetMonth As Date: targetMonth = DateAdd("m", monthIndex, currentDate)
+    Dim monthStart As Date: monthStart = DateSerial(Year(targetMonth), Month(targetMonth), 1)
+    Dim monthEnd As Date: monthEnd = DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0)
+    
+    ' Parse dates with explicit UK format (DD/MM/YYYY) to avoid regional issues
+    startDate = ParseUKDate(startDateText)
+    endDate = ParseUKDate(endDateText)
+    
+    ' Check if dates were parsed successfully
+    If startDate > 0 And endDate > 0 Then
+        
+        ' Calculate overlap with target month
+        Dim overlapStart As Date: overlapStart = Application.WorksheetFunction.Max(startDate, monthStart)
+        Dim overlapEnd As Date: overlapEnd = Application.WorksheetFunction.Min(endDate, monthEnd)
+        
+        If overlapEnd >= overlapStart Then
+            ' Calculate what fraction of the month the promo covers
+            Dim overlapDays As Long: overlapDays = overlapEnd - overlapStart + 1
+            Dim monthDays As Long: monthDays = monthEnd - monthStart + 1
+            CalculateDurationFactor = overlapDays / monthDays
+        Else
+            CalculateDurationFactor = 0  ' No overlap
+        End If
+    Else
+        CalculateDurationFactor = 1#   ' Assume full month if dates can't be parsed
+    End If
+    
+    Exit Function
+    
+ErrorHandler:
+    CalculateDurationFactor = 1#   ' Default to full month on error
+End Function
+
+Private Function ParseUKDate(dateText As String) As Date
+    ' Parse date string explicitly as DD/MM/YYYY format to avoid regional issues
+    On Error GoTo ErrorHandler
+    
+    Dim cleanDate As String: cleanDate = Trim(dateText)
+    If cleanDate = "" Then GoTo ErrorHandler
+    
+    ' Check if it's already a date value
+    If IsDate(cleanDate) Then
+        ' Try to detect if it's in correct format by checking day value
+        Dim testDate As Date: testDate = CDate(cleanDate)
+        Dim originalParts As Variant: originalParts = Split(cleanDate, "/")
+        
+        If UBound(originalParts) = 2 Then
+            Dim dayPart As Long: dayPart = Val(originalParts(0))
+            Dim monthPart As Long: monthPart = Val(originalParts(1))
+            Dim yearPart As Long: yearPart = Val(originalParts(2))
+            
+            ' If day part is >12, it's definitely DD/MM/YYYY
+            ' If month part is >12, it's definitely MM/DD/YYYY and needs swapping
+            If monthPart > 12 Then
+                ' Swap day and month
+                ParseUKDate = DateSerial(yearPart, dayPart, monthPart)
+            ElseIf dayPart > 12 Then
+                ' Already in DD/MM/YYYY format
+                ParseUKDate = DateSerial(yearPart, monthPart, dayPart)
+            Else
+                ' Ambiguous - force DD/MM/YYYY interpretation
+                ParseUKDate = DateSerial(yearPart, monthPart, dayPart)
+            End If
+        Else
+            ' Use default parsing if not in expected format
+            ParseUKDate = testDate
+        End If
+    Else
+        GoTo ErrorHandler
+    End If
+    
+    Exit Function
+    
+ErrorHandler:
+    ParseUKDate = 0  ' Return 0 for invalid dates
+End Function
+
+Private Function LoadPromosFromPowerQueryFixed(skuList As Collection) As Boolean
+    ' Try to create temporary worksheet from PromoRows Power Query connection
+    On Error GoTo ErrorHandler
+    
+    Application.ScreenUpdating = False
+    
+    ' Create temporary worksheet from PromoRows connection
+    Dim tempPromoWs As Worksheet
+    Set tempPromoWs = CreateTempWorksheetFromConnection("PromoRows")
+    
+    If tempPromoWs Is Nothing Then
+        ' Try alternative connection names
+        Set tempPromoWs = CreateTempWorksheetFromConnection("Query - PromoRows")
+        If tempPromoWs Is Nothing Then
+            Set tempPromoWs = CreateTempWorksheetFromConnection("PromoRows_Query")
+        End If
+    End If
+    
+    If Not tempPromoWs Is Nothing Then
+        Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+        Dim promosLoaded As Long: promosLoaded = 0
+        Dim currentDate As Date: currentDate = Date
+        
+        ' Find the data range in temp worksheet
+        Dim lastRow As Long: lastRow = tempPromoWs.Cells(tempPromoWs.Rows.Count, 1).End(xlUp).row
+        
+        If lastRow > 1 Then
+            ' Read all data at once
+            Dim promoData As Variant: promoData = tempPromoWs.Range("A1:M" & lastRow).Value
+                
+            ' Process data similar to worksheet method but more efficiently
+            Dim skuCol As Long, discountTypeCol As Long, discountAmtCol As Long
+            Dim startDateCol As Long, endDateCol As Long, monthYearCol As Long
+            
+            ' Find columns in header row
+            Dim i As Long
+            For i = 1 To UBound(promoData, 2)
+                Select Case UCase(Trim(CStr(promoData(1, i))))
+                    Case "SKU": skuCol = i
+                    Case "DISCOUNTTYPE": discountTypeCol = i
+                    Case "DISCOUNTAMT": discountAmtCol = i
+                    Case "STARTDATE": startDateCol = i
+                    Case "ENDDATE": endDateCol = i
+                    Case "MONTHYEAR": monthYearCol = i
+                End Select
+            Next i
+            
+            ' Process promo data if all columns found
+            If skuCol > 0 And discountTypeCol > 0 And discountAmtCol > 0 And startDateCol > 0 And endDateCol > 0 And monthYearCol > 0 Then
+                
+                Dim maxExpectedPromos As Long: maxExpectedPromos = skuList.Count * 12 * PROMOS_PER_MONTH
+                
+                For i = 2 To UBound(promoData, 1)
+                    ' PERFORMANCE: Early exit if we've loaded enough promos
+                    If promosLoaded >= maxExpectedPromos Then Exit For
+                    
+                    Dim sku As String: sku = UCase(Trim(CStr(promoData(i, skuCol))))
+                    Dim promoType As String: promoType = Trim(CStr(promoData(i, discountTypeCol)))
+                    Dim promoValue As String: promoValue = Trim(CStr(promoData(i, discountAmtCol)))
+                    Dim startDate As String: startDate = Trim(CStr(promoData(i, startDateCol)))
+                    Dim endDate As String: endDate = Trim(CStr(promoData(i, endDateCol)))
+                    Dim monthYear As String: monthYear = Trim(CStr(promoData(i, monthYearCol)))
+                    
+                    ' PERFORMANCE: Use O(1) dictionary lookup instead of linear search
+                    On Error Resume Next
+                    Dim skuRow As Long: skuRow = skuRowDict(sku)
+                    On Error GoTo 0
+                    
+                    If skuRow > 0 Then
+                        Dim monthIndex As Long: monthIndex = CalculateMonthIndex(monthYear, currentDate)
+                        
+                        If monthIndex >= 0 And monthIndex <= 11 Then
+                            ' Find available promo slot
+                            Dim promoSlot As Long
+                            For promoSlot = 1 To PROMOS_PER_MONTH
+                                Dim promoStartCol As Long: promoStartCol = PROMO_START_COL + (monthIndex * PROMOS_PER_MONTH * PROMO_COLS_PER_SLOT) + ((promoSlot - 1) * PROMO_COLS_PER_SLOT)
+                                
+                                If ws.Cells(skuRow, promoStartCol).Value = "" Then
+                                    ' Parse original dates
+                                    Dim originalStartDate As Date: originalStartDate = ParseUKDate(startDate)
+                                    Dim originalEndDate As Date: originalEndDate = ParseUKDate(endDate)
+                                    
+                                    If originalStartDate > 0 And originalEndDate > 0 Then
+                                        ' Split promo by month if needed
+                                        Dim splitResult As Variant
+                                        splitResult = SplitPromoByMonth(originalStartDate, originalEndDate, monthIndex, currentDate)
+                                        
+                                        If splitResult(2) Then ' isValid
+                                            ws.Cells(skuRow, promoStartCol).Value = promoType
+                                            ws.Cells(skuRow, promoStartCol + 1).Value = promoValue
+                                            ws.Cells(skuRow, promoStartCol + 2).Value = splitResult(0) ' Adjusted start
+                                            ws.Cells(skuRow, promoStartCol + 3).Value = splitResult(1) ' Adjusted end
+                                            ws.Cells(skuRow, promoStartCol + 2).NumberFormat = "dd/mm/yyyy"
+                                            ws.Cells(skuRow, promoStartCol + 3).NumberFormat = "dd/mm/yyyy"
+                                            
+                                            ' Add comment showing original dates if split
+                                            If splitResult(0) <> originalStartDate Or splitResult(1) <> originalEndDate Then
+                                                SafeAddComment ws.Cells(skuRow, promoStartCol), _
+                                                    "Original: " & Format(originalStartDate, "dd/mm/yyyy") & _
+                                                    " - " & Format(originalEndDate, "dd/mm/yyyy")
+                                            End If
+                                            
+                                            promosLoaded = promosLoaded + 1
+                                            Exit For
+                                        End If
+                                    End If
+                                End If
+                            Next promoSlot
+                        End If
+                    End If
+                    
+                    ' PERFORMANCE: Progress update and memory management every 1000 records
+                    If (i - 1) Mod 1000 = 0 Then
+                        DoEvents
+                        Application.StatusBar = "Loading promos from Power Query... " & promosLoaded & " loaded"
+                    End If
+                Next i
+                
+                Application.StatusBar = False
+                
+                ' Recalculate forecasts
+                CalculateEnhancedForecastsForAllSKUs skuList
+                
+                ' Clean up temp worksheet
+                Application.DisplayAlerts = False
+                tempPromoWs.Delete
+                Application.DisplayAlerts = True
+                
+                LoadPromosFromPowerQueryFixed = True
+                Exit Function
+            End If
+        End If
+        
+        ' Clean up temp worksheet if still exists
+        Application.DisplayAlerts = False
+        If Not tempPromoWs Is Nothing Then tempPromoWs.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+    Application.ScreenUpdating = True
+
+ErrorHandler:
+    Application.ScreenUpdating = True
+    LoadPromosFromPowerQueryFixed = False
+End Function
+
+Private Function SplitPromoByMonth(promoStartDate As Date, promoEndDate As Date, _
+                                  targetMonthIndex As Long, currentDate As Date) As Variant
+    ' Returns array: (adjustedStart, adjustedEnd, isValid)
+    
+    ' FIXED: Use first day of current month as reference
+    Dim referenceDate As Date: referenceDate = DateSerial(Year(currentDate), Month(currentDate), 1)
+    Dim targetMonth As Date: targetMonth = DateAdd("m", targetMonthIndex, referenceDate)
+    Dim monthStart As Date: monthStart = DateSerial(Year(targetMonth), Month(targetMonth), 1)
+    Dim monthEnd As Date: monthEnd = DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0)
+    
+    ' Check if promo overlaps with target month
+    If promoEndDate < monthStart Or promoStartDate > monthEnd Then
+        ' No overlap
+        SplitPromoByMonth = Array(0, 0, False)
+        Exit Function
+    End If
+    
+    ' Calculate overlap dates
+    Dim adjustedStart As Date: adjustedStart = Application.Max(promoStartDate, monthStart)
+    Dim adjustedEnd As Date: adjustedEnd = Application.Min(promoEndDate, monthEnd)
+    
+    SplitPromoByMonth = Array(adjustedStart, adjustedEnd, True)
+End Function
+
+Private Sub WriteBatchResults(ws As Worksheet, qtyValues As Object, revValues As Object, _
+    qtyFormats As Object, revFormats As Object, qtyColors As Object, revColors As Object)
+    
+    ' PERFORMANCE: Write all values in batches to minimize Excel calls
+    Dim key As Variant
+    
+    ' Write quantity values
+    For Each key In qtyValues.Keys
+        Dim parts As Variant: parts = Split(key, "_")
+        Dim row As Long: row = CLng(parts(0))
+        Dim col As Long: col = CLng(parts(1))
+        
+        ws.Cells(row, col).Value = qtyValues(key)
+        ws.Cells(row, col).NumberFormat = qtyFormats(key)
+        ws.Cells(row, col).Interior.color = qtyColors(key)
+    Next key
+    
+    ' Write revenue values
+    For Each key In revValues.Keys
+        parts = Split(key, "_")
+        row = CLng(parts(0))
+        col = CLng(parts(1))
+        
+        ws.Cells(row, col).Value = revValues(key)
+        ws.Cells(row, col).NumberFormat = revFormats(key)
+        ws.Cells(row, col).Interior.color = revColors(key)
+    Next key
+End Sub
+
+Sub EnableBulkMode()
+    bulkUpdateMode = True
+    Set pendingRows = New Collection
+    Application.StatusBar = "Bulk update mode enabled. Paste your data then click 'Apply Bulk Changes'"
+End Sub
+
+Sub ApplyBulkChanges()
+    If Not bulkUpdateMode Or pendingRows Is Nothing Then Exit Sub
+    
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+    
+    Dim totalRows As Long: totalRows = pendingRows.Count
+    Dim processed As Long: processed = 0
+    
+    ' Process in batches of 100 for progress updates
+    Dim row As Variant
+    For Each row In pendingRows
+        RefreshSingleSKUEnhanced CLng(row)
+        processed = processed + 1
+        
+        If processed Mod 100 = 0 Then
+            Application.StatusBar = "Processing " & processed & " of " & totalRows & " rows..."
+            DoEvents
+        End If
+    Next row
+    
+    bulkUpdateMode = False
+    Set pendingRows = Nothing
+    
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    Application.StatusBar = "Bulk update completed for " & totalRows & " rows"
+End Sub
+
+Private Sub CalculateEnhancedForecastForSingleSKU(targetRow As Long, sku As String)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    
+    ' PERFORMANCE: Single dictionary lookup with error handling
+    Dim cachedData As Variant
+    On Error Resume Next
+    cachedData = dataDict(sku)
+    If Err.Number <> 0 Then
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    Dim baselineQty As Double: baselineQty = cachedData(IDX_BASE_QTY)
+    Dim baselinePrice As Double: baselinePrice = cachedData(IDX_BASE_PRICE)
+    Dim qualityScore As Double: qualityScore = cachedData(IDX_QUALITY)
+    Dim priceElasticity As Double: priceElasticity = cachedData(IDX_PRICE_ELASTICITY)
+    
+    ' NEW: Check for sparse data with safety
+    Dim isSparseData As Boolean: isSparseData = False
+    Dim monthsSinceFirst As Double: monthsSinceFirst = 1
+    Dim totalQtySold As Double: totalQtySold = 0
+    
+    On Error Resume Next
+    If UBound(cachedData) >= IDX_SPARSE_DATA Then
+        isSparseData = cachedData(IDX_SPARSE_DATA)
+    End If
+    If UBound(cachedData) >= IDX_MONTHS_SINCE_FIRST Then
+        monthsSinceFirst = cachedData(IDX_MONTHS_SINCE_FIRST)
+    End If
+    If UBound(cachedData) >= IDX_TOTAL_QTY_SOLD Then
+        totalQtySold = cachedData(IDX_TOTAL_QTY_SOLD)
+    End If
+    On Error GoTo 0
+    
+    ' PERFORMANCE: Early exit for invalid data
+    If baselineQty <= 0 Or baselinePrice <= 0 Then Exit Sub
+    
+    ' Calculate for each month
+    Dim monthIndex As Long
+    For monthIndex = 0 To 11
+        Dim qtyCol As Long: qtyCol = FORECAST_QTY_START_COL + monthIndex
+        Dim revCol As Long: revCol = FORECAST_REV_START_COL + monthIndex
+        
+        ' Use proper monthly calculation from daily baseline
+        Dim monthlyQty As Double: monthlyQty = baselineQty * 30.44
+        
+        ' NEW: Apply conservative adjustment for sparse data items
+        If isSparseData And monthsSinceFirst > 3 Then
+            ' For sparse items, cap the monthly forecast based on historical monthly average
+            Dim historicalMonthlyAvg As Double: historicalMonthlyAvg = totalQtySold / monthsSinceFirst
+            If monthlyQty > historicalMonthlyAvg * 2 Then
+                monthlyQty = historicalMonthlyAvg * 1.2  ' Allow 20% growth max
+            End If
+        End If
+        
+        ' Apply seasonality with reasonable bounds
+        Dim seasonality As Double: seasonality = cachedData(IDX_MONTH1 + monthIndex)
+        If seasonality <= 0 Then seasonality = 1
+        
+        ' MORE conservative seasonality for sparse items
+        If isSparseData Then
+            If seasonality < 0.8 Then seasonality = 0.8
+            If seasonality > 1.2 Then seasonality = 1.2
+        Else
+            If seasonality < 0.7 Then seasonality = 0.7
+            If seasonality > 1.5 Then seasonality = 1.5
+        End If
+        
+        Dim afterSeasonality As Double: afterSeasonality = monthlyQty * seasonality
+        
+        ' Quality adjustment - more conservative for sparse data
+        Dim qualityAdjustment As Double
+        If isSparseData Then
+            qualityAdjustment = 0.8 + (qualityScore * 0.1)  ' Range: 0.8 to 0.9
+        Else
+            qualityAdjustment = 0.9 + (qualityScore * 0.1)  ' Range: 0.9 to 1.0
+        End If
+        Dim afterQuality As Double: afterQuality = afterSeasonality * qualityAdjustment
+        
+        ' Apply promo lifts - reduced effect for sparse items
+        Dim totalLift As Double: totalLift = CalculatePromoLiftsFromSheetEnhanced(targetRow, monthIndex, cachedData)
+        If isSparseData And totalLift > 0 Then
+            totalLift = totalLift * 0.5  ' Reduce promo effect by 50% for sparse items
+        End If
+        
+        ' Final calculation
+        Dim finalQty As Double: finalQty = afterQuality
+        If totalLift > 0 Then
+            finalQty = afterQuality * (1 + totalLift)
+            ' Cap maximum lift
+            If isSparseData Then
+                If finalQty > baselineQty * 30.44 * seasonality * 2 Then
+                    finalQty = baselineQty * 30.44 * seasonality * 2
+                End If
+            Else
+                If finalQty > baselineQty * 30.44 * seasonality * 5 Then
+                    finalQty = baselineQty * 30.44 * seasonality * 5
+                End If
+            End If
+            ' Highlight promo months
+            ws.Cells(targetRow, qtyCol).Interior.color = RGB(255, 242, 204)
+            ws.Cells(targetRow, revCol).Interior.color = RGB(255, 242, 204)
+        Else
+            ws.Cells(targetRow, qtyCol).Interior.color = RGB(235, 241, 222)
+            ws.Cells(targetRow, revCol).Interior.color = RGB(221, 235, 247)
+        End If
+        
+        ' Calculate revenue
+        Dim monthlyRevenue As Double: monthlyRevenue = finalQty * baselinePrice
+        
+        ' Display results
+        ' Use decimal precision to preserve revenue for low-volume items
+        ws.Cells(targetRow, qtyCol).Value = Round(finalQty, 2)
+        ws.Cells(targetRow, revCol).Value = Round(monthlyRevenue, 2)
+        
+        ws.Cells(targetRow, qtyCol).NumberFormat = "#,##0.00"
+        ws.Cells(targetRow, revCol).NumberFormat = "£#,##0.00"
+    Next monthIndex
+End Sub
+' === RECALC ALL PASTED PROMO ROWS ===
+Sub RecalcPastedPromoRows()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(ANALYSIS_SHEET)
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, SKU_COL).End(xlUp).row
+
+    '-- make sure baseline & seasonality arrays exist
+    If dataDict Is Nothing Then
+        InitializePerformanceDictionaries                       'just creates empty dicts
+        Dim skuList As Collection: Set skuList = GetSKUListEnhanced()
+        LoadBaselineDataEnhanced skuList                        'fills dataDict, no sheet-wipe
+    End If
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    Dim r As Long
+    For r = SKU_START_ROW To lastRow
+        If Application.WorksheetFunction.CountA( _
+             ws.Range(ws.Cells(r, PROMO_START_COL), ws.Cells(r, 52))) > 0 Then   'AC:AZ = 29:52
+            RefreshSingleSKUEnhanced r
+        End If
+    Next r
+
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+End Sub
+
+
