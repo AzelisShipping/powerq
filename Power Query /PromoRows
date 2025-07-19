@@ -1,0 +1,141 @@
+let
+    // === CONFIGURATION ===
+    MonthsToLoad   = 13,  // How many months of promo history to load
+    MonthsForward  = 3,   // How many months forward to look for promos
+    RootPath       = "C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto\",
+
+    // Calculate date range
+    CurrentDate = DateTime.Date(DateTime.LocalNow()),
+    StartDate   = Date.AddMonths(CurrentDate, -MonthsToLoad),
+    EndDate     = Date.AddMonths(CurrentDate, MonthsForward),
+
+    // 1. Load all CSV files
+    Source            = Folder.Files(RootPath),
+    FilteredFiles     = Table.SelectRows(Source, each [Extension] = ".csv"),
+    FilteredByPattern = Table.SelectRows(FilteredFiles, each Text.Contains([Name], "_") and (Text.EndsWith([Name], ".csv") or Text.EndsWith([Name], ".CSV"))),
+
+    // 2. Extract folder-based categories
+    WithCat = Table.AddColumn(FilteredByPattern, "Categories", each
+        let
+            parts     = Text.Split(Text.AfterDelimiter([Folder Path], "12_PricingAuto\"), "\"),
+            market    = try parts{0} otherwise null,
+            channel   = try parts{1} otherwise null,
+            brand     = try parts{2} otherwise null,
+            skutype   = try parts{3} otherwise null
+        in
+            [Market=market, Channel=channel, Brand=brand, SKUType=skutype],
+        type record
+    ),
+    ExpandedCat = Table.ExpandRecordColumn(WithCat, "Categories", {"Market","Channel","Brand","SKUType"}),
+
+    // 3. Filter to your target Market/Channel/Brand (parameters)
+    Filtered = Table.SelectRows(ExpandedCat, each
+        Text.Upper([Market ]) = Text.Upper(Market)  and
+        Text.Upper([Channel]) = Text.Upper(Channel) and
+        Text.Upper([Brand  ]) = Text.Upper(Brand)
+    ),
+    BufferedFiles = Table.Buffer(Filtered),
+
+    // 4. Import CSV contents
+    ImportedData = Table.AddColumn(BufferedFiles, "Data", each
+        let
+            csvContent = Csv.Document(
+                File.Contents([Folder Path] & [Name]),
+                [ Delimiter=",", Columns=11, Encoding=1252, QuoteStyle=QuoteStyle.None ]
+            )
+        in
+            Table.PromoteHeaders(csvContent),
+        type table
+    ),
+
+    // 5. Expand and clean
+    ExpandedData = Table.ExpandTableColumn(ImportedData, "Data",
+        {"SKU","Market","Channel","Brand","SKUType","DiscountType","DiscountAmt","StartDate","EndDate","RRPMaster","SellPriceMaster"},
+        {"SKU","_Market","_Channel","_Brand","_SKUType","DiscountType","DiscountAmt","StartDate","EndDate","RRPMaster","SellPriceMaster"}
+    ),
+    CleanedData = Table.SelectRows(ExpandedData, each
+        [SKU] <> null and [SKU] <> "" and [SKU] <> "SKU" and
+        [DiscountType] <> null and [DiscountType] <> ""
+    ),
+    RemovedMetadata = Table.RemoveColumns(CleanedData,
+        {"_Market","_Channel","_Brand","_SKUType","Content","Name","Extension","Date accessed","Date modified","Date created","Folder Path","Attributes"}
+    ),
+    TypedData = Table.TransformColumnTypes(RemovedMetadata, {
+        {"SKU", type text}, {"Market", type text}, {"Channel", type text}, {"Brand", type text},
+        {"SKUType", type text}, {"DiscountType", type text},
+        {"DiscountAmt", type number}, {"RRPMaster", type number}, {"SellPriceMaster", type number}
+    }),
+    ParsedDates = Table.TransformColumns(TypedData, {
+        {"StartDate", each try Date.From(_) otherwise null, type date},
+        {"EndDate"  , each try Date.From(_) otherwise null, type date}
+    }),
+    ValidDates = Table.SelectRows(ParsedDates, each [StartDate] <> null and [EndDate] <> null),
+
+    // 6. Keep promos overlapping our analysis window
+    FilteredByDate = Table.SelectRows(ValidDates, each
+        let
+            promoStart = [StartDate],
+            promoEnd   = [EndDate]
+        in
+            promoStart <= EndDate and promoEnd >= StartDate
+    ),
+
+    // 7. Generate list of month‐years for each promo
+    WithMonthList = Table.AddColumn(FilteredByDate, "MonthYear", each
+        let
+            sd = [StartDate],
+            ed = [EndDate],
+            months = List.Generate(
+                () => Date.StartOfMonth(sd),
+                each _ <= Date.StartOfMonth(ed),
+                each Date.AddMonths(_, 1)
+            )
+        in
+            List.Transform(months, each Date.ToText(_, "yyyyMM")),
+        type list
+    ),
+    ExpandedMonths = Table.ExpandListColumn(WithMonthList, "MonthYear"),
+
+    // 8. FILTER to the full window (13 months back → 3 months forward)
+    MonthsWindow = Table.SelectRows(ExpandedMonths, each
+        let
+            y           = Number.From(Text.Start([MonthYear], 4)),
+            m           = Number.From(Text.End([MonthYear], 2)),
+            monthDate   = #date(y, m, 1),
+            windowStart = Date.StartOfMonth(StartDate),
+            windowEnd   = Date.StartOfMonth(EndDate)
+        in
+            monthDate >= windowStart and monthDate <= windowEnd
+    ),
+
+    // 9. Add promo summary
+    WithPromoSummary = Table.AddColumn(MonthsWindow, "PromoHistory", each
+        let
+            sd      = [StartDate],
+            ed      = [EndDate],
+            tp      = [DiscountType],
+            amt     = [DiscountAmt],
+            amtText = if amt < 1 then Text.From(Number.Round(amt * 100)) & "%" else "£" & Text.From(Number.Round(amt, 2)),
+            dateRng = Text.From(Date.Day(sd)) & "–" & Text.From(Date.Day(ed))
+        in
+            dateRng & " " & tp & " " & amtText,
+        type text
+    ),
+
+    // 10. Flag split months
+    AddSplitFlag = Table.AddColumn(WithPromoSummary, "IsSplitMonth", each
+        Date.StartOfMonth([StartDate]) <> Date.StartOfMonth([EndDate]),
+        type logical
+    ),
+
+    // 11. Sort, index, select final columns
+    SortedData   = Table.Sort(AddSplitFlag, {{"SKU", Order.Ascending}, {"MonthYear", Order.Ascending}}),
+    WithIndex    = Table.AddIndexColumn(SortedData, "PromoIndex", 1, 1, Int64.Type),
+    FinalColumns = Table.SelectColumns(WithIndex, {
+        "PromoIndex","SKU","Market","Channel","Brand","SKUType",
+        "DiscountType","DiscountAmt","StartDate","EndDate",
+        "RRPMaster","SellPriceMaster","MonthYear","PromoHistory","IsSplitMonth"
+    })
+
+in
+    FinalColumns
