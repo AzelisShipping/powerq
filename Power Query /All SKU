@@ -1,0 +1,116 @@
+let
+    // === PERFORMANCE: Buffer smaller lookup tables early ===
+    BufferedABC = Table.Buffer(ABC),
+    BufferedQuery1 = Table.Buffer(Query1),
+    BufferedOOSDays = Table.Buffer(#"OOS Days"),
+    BufferedPromoROI = Table.Buffer(PromoROI),
+
+    // connect to SQL Server and database
+    Source = Sql.Databases("40.113.5.200"),
+    Reporting_Ford_Custom = Source{[Name="Reporting_Ford_Custom"]}[Data],
+    dbo_Greg_all_prices_temp = Reporting_Ford_Custom{[Schema="dbo",Item="Greg_all_prices_temp"]}[Data],
+
+    // === PERFORMANCE: Filter as early as possible ===
+    #"Filtered Rows" = Table.SelectRows(dbo_Greg_all_prices_temp, each [Market] = Market and [Channel] = Channel),
+    
+    // === PERFORMANCE: Only select needed columns early ===
+    #"Selected Essential Columns" = Table.SelectColumns(#"Filtered Rows", {
+        "Market", "Channel", "SKU", "MLICode", "ListingStatus", "Title", "MLIName",
+        "Prev_SellingPrice", "Prev_Days_at_Price", "Sales", "Quantity", "Quantity_at_discount", 
+        "Discount", "Discount_pc", "Sales_per_day", "Quantity_per_day", "Markup_pc",
+        "SellingPrice", "DealerNet", "RRP", "SellStartDate", "Days_at_price", "Ford Price From"
+    }),
+    
+    #"Changed Type" = Table.TransformColumnTypes(
+        #"Selected Essential Columns",
+        {{"Markup_pc", Percentage.Type}, {"Quantity_per_day", type number}}
+    ),
+
+    // === PERFORMANCE: Use buffered ABC table ===
+    #"Merged ABC" = Table.NestedJoin(
+        #"Changed Type", {"SKU"},
+        BufferedABC, {"SKU"},
+        "ABC", JoinKind.LeftOuter
+    ),
+    #"Expanded ABC" = Table.ExpandTableColumn(
+        #"Merged ABC", "ABC",
+        {
+          "ABC","isComposite","3m_Quantity","6m_Quantity",
+          "1y_Quantity","2y_Quantity","Future StartDate",
+          "Future RRP","Future Cost","SellingPrice",
+          "Days at Price","Present RRP","Present Cost",
+          "Present Markup","Present Discount"
+        },
+        {
+          "ABC.ABC","ABC.isComposite","ABC.3m_Quantity",
+          "ABC.6m_Quantity","ABC.1y_Quantity","ABC.2y_Quantity",
+          "ABC.Future StartDate","ABC.Future RRP",
+          "ABC.Future Cost","ABC.SellingPrice",
+          "ABC.Days at Price","ABC.Present RRP",
+          "ABC.Present Cost","ABC.Present Markup",
+          "ABC.Present Discount"
+        }
+    ),
+
+    // cleanup and round in one step
+    #"Cleaned and Rounded" = Table.TransformColumns(
+        Table.RemoveColumns(
+            Table.Distinct(#"Expanded ABC"),
+            {
+              "ABC.SellingPrice","ABC.Days at Price",
+              "ABC.Present RRP","ABC.Present Cost"
+            }
+        ),
+        {
+          {"Sales_per_day", each Number.Round(_, 2), type number},
+          {"Quantity_per_day", each Number.Round(_, 2), type number},
+          {"DealerNet", each Number.Round(_, 2), type number}
+        }
+    ),
+
+    // add calculated % columns
+    #"Added Calculations" = Table.AddColumn(
+        Table.AddColumn(
+            #"Cleaned and Rounded",
+            "Markup %",
+            each if [DealerNet] = 0 then null
+                 else ([SellingPrice] - [DealerNet]) / [DealerNet],
+            Percentage.Type
+        ),
+        "Discount %",
+        each if [RRP] = 0 then null
+             else ([RRP] - [SellingPrice]) / [RRP],
+        Percentage.Type
+    ),
+
+    #"Removed ABC Columns" = Table.RemoveColumns(
+        #"Added Calculations",
+        {"ABC.Present Markup","ABC.Present Discount"}
+    ),
+
+    // === PERFORMANCE: Use buffered promo history ===
+    #"Merged PromoHistory" = Table.NestedJoin(
+        #"Removed ABC Columns", {"SKU"},
+        BufferedQuery1, {"SKU"},
+        "Query1", JoinKind.LeftOuter
+    ),
+
+    // dynamically expand promo history columns
+    colsToExpand = List.RemoveItems(Table.ColumnNames(BufferedQuery1), {"SKU"}),
+    #"Expanded PromoHistory" = Table.ExpandTableColumn(
+        #"Merged PromoHistory", "Query1", colsToExpand, colsToExpand
+    ),
+    
+    // === PERFORMANCE: Use buffered OOS Days ===
+    #"Merged OOS" = Table.NestedJoin(
+        #"Expanded PromoHistory", {"SKU"}, 
+        BufferedOOSDays, {"SKU"}, 
+        "OOS Days", JoinKind.LeftOuter
+    ),
+    #"Expanded OOS Days" = Table.ExpandTableColumn(
+        #"Merged OOS", "OOS Days", 
+        {"DaysOOS_LastMonth", "DaysOOS_Last6M", "DaysOOS_LastYear"}, 
+        {"DaysOOS_LastMonth", "DaysOOS_Last6M", "DaysOOS_LastYear"}
+    )
+in
+    #"Expanded OOS Days"
