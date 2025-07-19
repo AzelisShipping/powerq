@@ -1,0 +1,80 @@
+let
+    // === PERFORMANCE: Buffer smaller lookup tables early ===
+    BufferedABC       = Table.Buffer(ABC),
+    BufferedQuery1    = Table.Buffer(Query1),
+    BufferedOOSDays   = Table.Buffer(#"OOS Days"),
+    BufferedPromoROI  = Table.Buffer(PromoROI),
+
+    // connect to SQL Server and database
+    Source            = Sql.Databases("40.113.5.200"),
+    ReportingDB       = Source{[Name="Reporting_Ford_Custom"]}[Data],
+    RawPrices         = ReportingDB{[Schema="dbo",Item="Greg_all_prices_temp"]}[Data],
+
+    // === filter by Market only ===
+    FilteredMarket    = Table.SelectRows(RawPrices, each [Market] = Market),
+
+    // === take only the most‐recent price row per SKU+Channel ===
+    SortedRows        = Table.Sort(FilteredMarket, {{"SellStartDate", Order.Descending}}),
+    UniqueRows        = Table.Distinct(SortedRows, {"Market","SKU","Channel"}),
+
+    // split descriptive vs pricing columns
+    DescriptiveCols   = Table.SelectColumns(UniqueRows, {"Market","SKU","ListingStatus","Title","MLIName"}),
+    PricingCols       = Table.SelectColumns(UniqueRows, {"Market","SKU","Channel","SellingPrice","RRP"}),
+
+    // build the list of channels
+    ChannelList       = List.Distinct(PricingCols[Channel]),
+
+    // pivot SellingPrice (using List.Max aggregator to avoid lists)
+    PivotSP           = Table.Pivot(
+                            PricingCols,
+                            ChannelList,
+                            "Channel",
+                            "SellingPrice",
+                            List.Max
+                        ),
+    RenameSP          = Table.RenameColumns(
+                            PivotSP,
+                            List.Transform(ChannelList, each {_, "SP_" & _})
+                        ),
+
+    // pivot RRP
+    PivotRRP          = Table.Pivot(
+                            PricingCols,
+                            ChannelList,
+                            "Channel",
+                            "RRP",
+                            List.Max
+                        ),
+    RenameRRP         = Table.RenameColumns(
+                            PivotRRP,
+                            List.Transform(ChannelList, each {_, "RRP_" & _})
+                        ),
+
+    // merge SP and RRP tables
+    MergeSP_RRP       = Table.NestedJoin(
+                            RenameSP, {"Market","SKU"},
+                            RenameRRP, {"Market","SKU"},
+                            "RRP_Table",
+                            JoinKind.LeftOuter
+                        ),
+    ExpandRRP         = Table.ExpandTableColumn(
+                            MergeSP_RRP,
+                            "RRP_Table",
+                            List.RemoveItems(Table.ColumnNames(RenameRRP), {"Market","SKU"})
+                        ),
+
+    // finally bring back the descriptive columns
+    MergeAll          = Table.NestedJoin(
+                            ExpandRRP, {"Market","SKU"},
+                            DescriptiveCols, {"Market","SKU"},
+                            "Desc",
+                            JoinKind.LeftOuter
+                        ),
+    Result            = Table.ExpandTableColumn(
+                            MergeAll,
+                            "Desc",
+                            {"ListingStatus","Title","MLIName"}
+                        ),
+    #"Removed Columns" = Table.RemoveColumns(Result,{"RRP", "SellingPrice"})
+in
+    #"Removed Columns"
