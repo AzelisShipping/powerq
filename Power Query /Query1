@@ -1,0 +1,94 @@
+let
+    // 1. Load all CSV files
+    Source      = Folder.Files("C:\Users\GregMichell\OneDrive - Autonative Ltd\FCSD eComm 2020 - Pricing\12_PricingAuto"),
+    CsvFiles    = Table.SelectRows(Source, each [Extension] = ".csv"),
+
+    // 2. Extract Market, Channel, Brand & SKUType from folder structure
+    WithCat     = Table.AddColumn(CsvFiles, "MarketChannelBrandSKUType", each 
+                    let
+                        fullPath = [Folder Path],
+                        afterRoot = Text.AfterDelimiter(fullPath, "12_PricingAuto\"),
+                        pathParts = Text.Split(afterRoot, "\"),
+                        market = if List.Count(pathParts) >= 1 then pathParts{0} else null,
+                        channel = if List.Count(pathParts) >= 2 then pathParts{1} else null,
+                        brand = if List.Count(pathParts) >= 3 then pathParts{2} else null,
+                        skutype = if List.Count(pathParts) >= 4 then pathParts{3} else null
+                    in
+                        [Market = market, Channel = channel, Brand = brand, SKUType = skutype]),
+    SplitCat    = Table.ExpandRecordColumn(WithCat, "MarketChannelBrandSKUType", {"Market", "Channel", "Brand", "SKUType"}),
+
+    // 3. Filter to this Market, Channel, Brand & SKUType (null-safe)
+    Filtered    = Table.SelectRows(SplitCat,
+                    each Value.Equals([Market], Market)
+                      and Value.Equals([Channel], Channel)
+                      and Value.Equals([Brand], Brand)
+                      and Value.Equals([SKUType], SKUType)),
+
+    // 4. Import CSV contents (now 11 columns)
+    Imported    = Table.AddColumn(Filtered, "Data", each Csv.Document(
+                    File.Contents([Folder Path]&[Name]),
+                    [Delimiter=",", Columns=11, Encoding=1252, QuoteStyle=QuoteStyle.None])),
+    Expanded    = Table.ExpandTableColumn(Imported, "Data",
+                    {"Column1","Column2","Column3","Column4","Column5","Column6","Column7","Column8","Column9","Column10","Column11"},
+                    {"SKU","_Market","_Channel","_Brand","_SKUType","DiscountType","DiscountAmt","StartDate","EndDate","RRPMaster","SellPriceMaster"}),
+
+    // 5. Clean & type
+    Clean1      = Table.SelectRows(Expanded,
+                    each not Value.Equals([SKU], "SKU") and [SKU] <> null),
+    Clean2      = Table.RemoveColumns(Clean1, {"_Market","_Channel","_Brand","_SKUType"}),
+    ChangedTypes= Table.TransformColumnTypes(Clean2,{
+                    {"SKU", type text}, {"Market", type text}, {"Channel", type text}, {"Brand", type text}, {"SKUType", type text},
+                    {"DiscountType", type text}, {"DiscountAmt", type number},
+                    {"StartDate", type date}, {"EndDate", type date},
+                    {"RRPMaster", type number}, {"SellPriceMaster", type number}}),
+
+    // 6. Drop metadata
+    RemovedMeta = Table.RemoveColumns(ChangedTypes,{
+                    "Content","Name","Extension","Date accessed","Date modified",
+                    "Date created","Folder Path","Attributes"}),
+
+    // 7. Expand each promo into its months
+    AddedMonthList = Table.AddColumn(RemovedMeta, "MonthYear", each
+        let
+            sd = [StartDate],
+            ed = [EndDate],
+            months = List.Generate(
+                        ()=> Date.StartOfMonth(sd),
+                        each _ <= Date.StartOfMonth(ed),
+                        each Date.AddMonths(_,1))
+        in  List.Transform(months, each Date.ToText(_,"yyyyMM")),
+        type list),
+    ExpandedMonths = Table.ExpandListColumn(AddedMonthList, "MonthYear"),
+
+    // 8. Build condensed promo string (handles blank DiscountAmt)
+    AddedHistory = Table.AddColumn(ExpandedMonths, "PromoHistory", each
+        let
+            sd      = [StartDate],
+            ed      = [EndDate],
+            tp      = [DiscountType],
+            amt     = [DiscountAmt],
+            amtText = if amt = null then ""
+                      else if amt < 1 then Text.From(Number.Round(amt*100,0)) & "%"
+                      else "£" & Text.From(Number.Round(amt,2))
+        in  Text.From(Date.Day(sd)) & "–" & Text.From(Date.Day(ed)) & " " & tp & " " & amtText,
+        type text),
+
+    // 9. Drop detail columns
+    Dropped     = Table.RemoveColumns(AddedHistory,
+                    {"Market","Channel","Brand","SKUType","DiscountType","DiscountAmt","StartDate","EndDate","RRPMaster","SellPriceMaster"}),
+
+    // 10. De-duplicate
+    DistinctRows= Table.Distinct(Dropped, {"SKU","MonthYear","PromoHistory"}),
+
+    // 11. Sort months (newest first)
+    AllMonths   = List.Sort(List.Distinct(DistinctRows[MonthYear]), Order.Descending),
+
+    // 12. Pivot with clear separator " || "
+    Pivoted     = Table.Pivot(
+                    DistinctRows,
+                    AllMonths,
+                    "MonthYear",
+                    "PromoHistory",
+                    each Text.Combine(_, " || "))
+in
+    Pivoted
