@@ -21,6 +21,7 @@ Private Const CHART_START_ROW As Long = 18
 ' Data dictionaries
 Private dailyPromoDict As Object
 Private skuDataDict As Object
+Private dailySeasonalityDict As Object
 
 Sub SetupDailyForecastSheet()
     Dim ws As Worksheet
@@ -57,6 +58,7 @@ Sub SetupDailyForecastSheet()
         .Range("B3").Interior.color = RGB(255, 255, 200)
         .Range("B3").Borders.LineStyle = xlContinuous
         .Range("B3").HorizontalAlignment = xlCenter
+        .Range("B3").NumberFormat = "@"  ' Text format to preserve month format
         
         ' Add month validation
         With .Range("B3").Validation
@@ -145,9 +147,10 @@ End Sub
 Private Function GetNext12Months() As String
     Dim monthList As String
     Dim i As Long
+    Dim baseDate As Date: baseDate = Date
     For i = 0 To 11
         If i > 0 Then monthList = monthList & ","
-        monthList = monthList & Format(DateAdd("m", i, Date), "mmm yyyy")
+        monthList = monthList & Format(DateAdd("m", i, baseDate), "mmm yyyy")
     Next i
     GetNext12Months = monthList
 End Function
@@ -210,33 +213,67 @@ Sub CalculateDailyForecasts()
     
     ' Get month details
     Dim targetMonth As Date
-    Dim monthParts() As String
-    monthParts = Split(selectedMonth, " ")
-    If UBound(monthParts) = 1 Then
-        Dim monthNum As Long
-        Select Case UCase(Left(monthParts(0), 3))
-            Case "JAN": monthNum = 1
-            Case "FEB": monthNum = 2
-            Case "MAR": monthNum = 3
-            Case "APR": monthNum = 4
-            Case "MAY": monthNum = 5
-            Case "JUN": monthNum = 6
-            Case "JUL": monthNum = 7
-            Case "AUG": monthNum = 8
-            Case "SEP": monthNum = 9
-            Case "OCT": monthNum = 10
-            Case "NOV": monthNum = 11
-            Case "DEC": monthNum = 12
-        End Select
-        targetMonth = DateSerial(Val(monthParts(1)), monthNum, 1)
+    
+    ' Check if it's a date format (DD/MM/YYYY)
+    If InStr(selectedMonth, "/") > 0 Then
+        ' Parse UK date format explicitly
+        Dim dateParts() As String
+        dateParts = Split(selectedMonth, "/")
+        If UBound(dateParts) = 2 Then
+            Dim dayPart As Long: dayPart = Val(dateParts(0))
+            Dim monthPart As Long: monthPart = Val(dateParts(1))
+            Dim yearPart As Long: yearPart = Val(dateParts(2))
+            targetMonth = DateSerial(yearPart, monthPart, dayPart)
+        Else
+            targetMonth = DateSerial(Year(Date), Month(Date), 1)
+        End If
     Else
-        targetMonth = DateSerial(Year(Date), Month(Date), 1)
+        ' Original format (mmm yyyy)
+        Dim monthParts() As String
+        monthParts = Split(selectedMonth, " ")
+        If UBound(monthParts) = 1 Then
+            Dim monthNum As Long
+            Select Case UCase(Left(monthParts(0), 3))
+                Case "JAN": monthNum = 1
+                Case "FEB": monthNum = 2
+                Case "MAR": monthNum = 3
+                Case "APR": monthNum = 4
+                Case "MAY": monthNum = 5
+                Case "JUN": monthNum = 6
+                Case "JUL": monthNum = 7
+                Case "AUG": monthNum = 8
+                Case "SEP": monthNum = 9
+                Case "OCT": monthNum = 10
+                Case "NOV": monthNum = 11
+                Case "DEC": monthNum = 12
+            End Select
+            targetMonth = DateSerial(Val(monthParts(1)), monthNum, 1)
+        Else
+            targetMonth = DateSerial(Year(Date), Month(Date), 1)
+        End If
     End If
     
     Dim monthStart As Date: monthStart = DateSerial(Year(targetMonth), Month(targetMonth), 1)
     Dim monthEnd As Date: monthEnd = DateSerial(Year(targetMonth), Month(targetMonth) + 1, 0)
     Dim daysInMonth As Long: daysInMonth = Day(monthEnd)
-    Dim monthIndex As Long: monthIndex = DateDiff("m", Date, targetMonth) + 1
+    ' Calculate month index from current month (0-based for first month, 11 for 12th month)
+    Dim currentMonthStart As Date: currentMonthStart = DateSerial(Year(Date), Month(Date), 1)
+    Dim monthIndex As Long: monthIndex = DateDiff("m", currentMonthStart, targetMonth)
+    
+    ' Debug month calculation
+    Debug.Print "=== MONTH CALCULATION DEBUG ==="
+    Debug.Print "Today: " & Format(Date, "dd/mm/yyyy")
+    Debug.Print "Selected Month String: " & selectedMonth
+    Debug.Print "Target Month: " & Format(targetMonth, "mmm yyyy")
+    Debug.Print "Current Month Start: " & Format(currentMonthStart, "mmm yyyy")
+    Debug.Print "Month Index (DateDiff): " & monthIndex
+    Debug.Print "==============================="
+    
+    ' Validate monthIndex is within range
+    If monthIndex < 0 Or monthIndex > 11 Then
+        MsgBox "Error: Selected month is outside the 12-month forecast range. Month index: " & monthIndex, vbExclamation
+        GoTo Cleanup
+    End If
     
     ' Add day headers
     Dim col As Long, d As Long
@@ -287,8 +324,8 @@ Sub CalculateDailyForecasts()
             ' Get monthly data
             Dim baseQty As Double: baseQty = Val(analysisWs.Cells(row, 3).Value)
             Dim basePrice As Double: basePrice = Val(analysisWs.Cells(row, 4).Value)
-            Dim monthQtyCol As Long: monthQtyCol = 4 + monthIndex
-            Dim monthRevCol As Long: monthRevCol = 16 + monthIndex
+            Dim monthQtyCol As Long: monthQtyCol = 5 + monthIndex  ' Qty columns start at 5
+            Dim monthRevCol As Long: monthRevCol = 17 + monthIndex  ' Rev columns start at 17
             Dim monthlyQty As Double: monthlyQty = Val(analysisWs.Cells(row, monthQtyCol).Value)
             Dim monthlyRev As Double: monthlyRev = Val(analysisWs.Cells(row, monthRevCol).Value)
             
@@ -299,6 +336,18 @@ Sub CalculateDailyForecasts()
                 ' Get promos for this SKU
                 Dim promos As Collection
                 Set promos = GetSKUPromosForMonth(analysisWs, row, monthIndex)
+                
+                ' Debug: Show details for first few SKUs
+                If totalSKUs <= 5 Then
+                    Debug.Print "===== SKU: " & sku & " ====="
+                    Debug.Print "Selected Month: " & Format(monthStart, "mmm yyyy")
+                    Debug.Print "Month Index: " & monthIndex
+                    Debug.Print "Qty Column: " & monthQtyCol & " (Value: " & monthlyQty & ")"
+                    Debug.Print "Rev Column: " & monthRevCol & " (Value: " & monthlyRev & ")"
+                    Debug.Print "Promo Start Col: " & (29 + (monthIndex * 12))
+                    Debug.Print "Promos Found: " & promos.Count
+                    Debug.Print "------------------------"
+                End If
                 
                 ' Calculate daily allocation
                 AllocateDailyByPromo sku, monthlyQty, monthlyRev, basePrice, promos, _
@@ -369,7 +418,7 @@ Private Function GetSKUPromosForMonth(analysisWs As Worksheet, row As Long, mont
     
     ' Calculate column range for selected month (3 promos per month, 4 cols each)
     ' In Analysis sheet, promos start at column AC (29)
-    promoStartCol = 29 + ((monthIndex - 1) * 12)
+    promoStartCol = 29 + (monthIndex * 12)
     
     Dim p As Long
     For p = 0 To 2
@@ -395,10 +444,24 @@ Private Sub AllocateDailyByPromo(sku As String, monthlyQty As Double, monthlyRev
     dailyRRP() As Double, dailyStrike() As Double, dailyCoupon() As Double, _
     dailyNonStrike() As Double, dailyTotalQty() As Double, dailyTotalRev() As Double)
     
-    ' Calculate daily baseline
-    Dim dailyBase As Double: dailyBase = monthlyQty / daysInMonth
+    ' Get daily distribution from seasonality data
+    Dim dailyDistribution() As Double
+    ReDim dailyDistribution(1 To daysInMonth)
     
-    ' Initialize allocation array
+    ' Try to get SKU-specific daily pattern from Power Query
+    Dim monthNum As Long: monthNum = Month(monthStart)
+    Dim hasSeasonalData As Boolean: hasSeasonalData = False
+    
+    On Error Resume Next
+    hasSeasonalData = GetDailySeasonalityPattern(sku, monthNum, dailyDistribution, daysInMonth)
+    On Error GoTo 0
+    
+    If Not hasSeasonalData Then
+        ' Fallback: Use generic weekday/weekend pattern
+        ApplyGenericDailyPattern monthStart, dailyDistribution, daysInMonth
+    End If
+    
+    ' Initialize promo allocation array
     Dim dailyAllocation() As String
     ReDim dailyAllocation(1 To daysInMonth)
     Dim d As Long
@@ -437,27 +500,49 @@ Private Sub AllocateDailyByPromo(sku As String, monthlyQty As Double, monthlyRev
         Next promo
     End If
     
-    ' Apply lift factors (simplified - you can enhance with actual lift data)
+    ' Apply lift factors
     Dim liftFactors As Object: Set liftFactors = CreateObject("Scripting.Dictionary")
     liftFactors("RRP") = 1#
     liftFactors("Strike-Through") = 1.25
     liftFactors("Coupon") = 1.2
     liftFactors("Non-Strike-Through") = 1.15
     
-    ' Calculate daily values with lift
-    Dim totalLiftedDays As Double: totalLiftedDays = 0
+    ' Calculate base daily quantities using seasonality distribution
+    Dim baseQty() As Double
+    ReDim baseQty(1 To daysInMonth)
+    
     For d = 1 To daysInMonth
-        Dim lift As Double: lift = liftFactors(dailyAllocation(d))
-        totalLiftedDays = totalLiftedDays + lift
+        baseQty(d) = monthlyQty * dailyDistribution(d)
     Next d
     
-    ' Normalize to match monthly total
-    Dim normalizedDaily As Double: normalizedDaily = monthlyQty / totalLiftedDays
+    ' Apply promo lifts to base quantities
+    Dim totalAdjustedQty As Double: totalAdjustedQty = 0
+    Dim adjustedQty() As Double
+    ReDim adjustedQty(1 To daysInMonth)
     
-    ' Allocate to arrays
     For d = 1 To daysInMonth
-        Dim dayQty As Double: dayQty = normalizedDaily * liftFactors(dailyAllocation(d))
-        Dim dayRev As Double: dayRev = (monthlyRev / monthlyQty) * dayQty
+        Dim lift As Double: lift = liftFactors(dailyAllocation(d))
+        adjustedQty(d) = baseQty(d) * lift
+        totalAdjustedQty = totalAdjustedQty + adjustedQty(d)
+    Next d
+    
+    ' Normalize to ensure total matches monthly forecast
+    Dim normalizationFactor As Double
+    If totalAdjustedQty > 0 Then
+        normalizationFactor = monthlyQty / totalAdjustedQty
+    Else
+        normalizationFactor = 1
+    End If
+    
+    ' Allocate to arrays with normalization
+    For d = 1 To daysInMonth
+        Dim dayQty As Double: dayQty = adjustedQty(d) * normalizationFactor
+        Dim dayRev As Double
+        If monthlyQty > 0 Then
+            dayRev = (monthlyRev / monthlyQty) * dayQty
+        Else
+            dayRev = 0
+        End If
         
         Select Case dailyAllocation(d)
             Case "RRP"
@@ -474,6 +559,226 @@ Private Sub AllocateDailyByPromo(sku As String, monthlyQty As Double, monthlyRev
         dailyTotalRev(d) = dailyTotalRev(d) + dayRev
     Next d
 End Sub
+
+Private Function GetDailySeasonalityPattern(sku As String, monthNum As Long, _
+    dailyDistribution() As Double, daysInMonth As Long) As Boolean
+    ' Load aggregate daily seasonality pattern (not SKU-specific)
+    On Error GoTo ErrorHandler
+    
+    ' Initialize dictionary if needed
+    If dailySeasonalityDict Is Nothing Then
+        Set dailySeasonalityDict = CreateObject("Scripting.Dictionary")
+    End If
+    
+    ' Check cache first - use month only as key (aggregate data)
+    Dim cacheKey As String: cacheKey = "MONTH_" & monthNum
+    If dailySeasonalityDict.Exists(cacheKey) Then
+        ' Use cached data
+        Dim cachedData As Variant: cachedData = dailySeasonalityDict(cacheKey)
+        Dim d As Long
+        For d = 1 To daysInMonth
+            If d <= UBound(cachedData) Then
+                dailyDistribution(d) = cachedData(d)
+            Else
+                dailyDistribution(d) = 0
+            End If
+        Next d
+        GetDailySeasonalityPattern = True
+        Exit Function
+    End If
+    
+    ' Load data if not in cache
+    If dailySeasonalityDict.Count = 0 Then
+        ' First time - load all aggregate data into cache
+        If Not LoadAggregateDailySeasonalityData() Then
+            GetDailySeasonalityPattern = False
+            Exit Function
+        End If
+    End If
+    
+    ' Try cache again after loading
+    If dailySeasonalityDict.Exists(cacheKey) Then
+        cachedData = dailySeasonalityDict(cacheKey)
+        For d = 1 To daysInMonth
+            If d <= UBound(cachedData) Then
+                dailyDistribution(d) = cachedData(d)
+            Else
+                dailyDistribution(d) = 0
+            End If
+        Next d
+        GetDailySeasonalityPattern = True
+    Else
+        GetDailySeasonalityPattern = False
+    End If
+    
+    Exit Function
+    
+ErrorHandler:
+    GetDailySeasonalityPattern = False
+End Function
+
+Private Function LoadAggregateDailySeasonalityData() As Boolean
+    ' Load aggregate daily seasonality data (by month/day only) into cache
+    On Error GoTo ErrorHandler
+    
+    ' Check if DailySeasonality data exists
+    Dim seasonWs As Worksheet
+    Set seasonWs = Nothing
+    On Error Resume Next
+    Set seasonWs = ThisWorkbook.Worksheets("DailySeasonality")
+    On Error GoTo 0
+    
+    If seasonWs Is Nothing Then
+        ' Try to load from Power Query connection
+        If Not LoadDailySeasonalityFromPowerQuery() Then
+            LoadAggregateDailySeasonalityData = False
+            Exit Function
+        End If
+        Set seasonWs = ThisWorkbook.Worksheets("DailySeasonality")
+    End If
+    
+    ' Read all data at once for performance
+    Dim lastRow As Long: lastRow = seasonWs.Cells(seasonWs.Rows.Count, 1).End(xlUp).row
+    If lastRow <= 1 Then
+        LoadAggregateDailySeasonalityData = False
+        Exit Function
+    End If
+    
+    ' Read data - expecting MonthNum, DayOfMonth, NormalizedQtyPct, WeekdayName, DataPoints
+    Dim dataRange As Variant: dataRange = seasonWs.Range("A2:E" & lastRow).Value
+    Dim tempDict As Object: Set tempDict = CreateObject("Scripting.Dictionary")
+    
+    ' Initialize arrays for each month
+    Dim m As Long
+    For m = 1 To 12
+        Dim dayArray(1 To 31) As Double
+        tempDict("MONTH_" & m) = dayArray
+    Next m
+    
+    ' Process all rows - aggregate data by month/day
+    Dim r As Long
+    Dim key As Variant
+    For r = 1 To UBound(dataRange, 1)
+        Dim monthNum As Long: monthNum = Val(dataRange(r, 1))
+        Dim dayOfMonth As Long: dayOfMonth = Val(dataRange(r, 2))
+        Dim qtyPct As Double: qtyPct = Val(dataRange(r, 3))
+        
+        ' Use quantity percentage for daily distribution
+        If monthNum >= 1 And monthNum <= 12 And dayOfMonth >= 1 And dayOfMonth <= 31 Then
+            key = "MONTH_" & monthNum
+            Dim arr As Variant: arr = tempDict(key)
+            arr(dayOfMonth) = qtyPct
+            tempDict(key) = arr
+        End If
+    Next r
+    
+    ' Verify each month's distribution sums to ~1 (allow small variance)
+    For Each key In tempDict.Keys
+        Dim distribution As Variant: distribution = tempDict(key)
+        Dim totalDist As Double: totalDist = 0
+        Dim d As Long
+        
+        ' Calculate total
+        For d = 1 To 31
+            totalDist = totalDist + distribution(d)
+        Next d
+        
+        ' Log warning if significantly off from 1
+        If totalDist > 0 And (totalDist < 0.95 Or totalDist > 1.05) Then
+            Debug.Print "Warning: " & key & " distribution sums to " & totalDist
+        End If
+    Next key
+    
+    ' Replace main dictionary with new data
+    Set dailySeasonalityDict = tempDict
+    LoadAggregateDailySeasonalityData = True
+    Exit Function
+    
+ErrorHandler:
+    LoadAggregateDailySeasonalityData = False
+End Function
+
+Private Sub ApplyGenericDailyPattern(monthStart As Date, dailyDistribution() As Double, daysInMonth As Long)
+    ' Apply a generic weekday/weekend pattern when no historical data exists
+    Dim d As Long
+    Dim dayDate As Date
+    Dim totalWeight As Double: totalWeight = 0
+    
+    ' First pass: assign weights
+    For d = 1 To daysInMonth
+        dayDate = DateSerial(Year(monthStart), Month(monthStart), d)
+        Select Case Weekday(dayDate, vbMonday)
+            Case 1 To 4 ' Monday to Thursday
+                dailyDistribution(d) = 1#
+            Case 5 ' Friday
+                dailyDistribution(d) = 1.3
+            Case 6 ' Saturday
+                dailyDistribution(d) = 1.5
+            Case 7 ' Sunday
+                dailyDistribution(d) = 1.2
+        End Select
+        totalWeight = totalWeight + dailyDistribution(d)
+    Next d
+    
+    ' Second pass: normalize to sum to 1
+    If totalWeight > 0 Then
+        For d = 1 To daysInMonth
+            dailyDistribution(d) = dailyDistribution(d) / totalWeight
+        Next d
+    Else
+        ' Fallback: uniform distribution
+        For d = 1 To daysInMonth
+            dailyDistribution(d) = 1# / daysInMonth
+        Next d
+    End If
+End Sub
+
+Private Function LoadDailySeasonalityFromPowerQuery() As Boolean
+    ' Load daily seasonality data from Power Query connection
+    On Error GoTo ErrorHandler
+    
+    Dim conn As WorkbookConnection
+    For Each conn In ThisWorkbook.Connections
+        If InStr(UCase(conn.Name), "DAILYSEASONALITY") > 0 Then
+            ' Create temporary worksheet
+            Application.ScreenUpdating = False
+            Dim tempWs As Worksheet
+            Set tempWs = ThisWorkbook.Worksheets.Add
+            tempWs.Name = "DailySeasonality"
+            
+            ' Load data
+            Dim qt As queryTable
+            Set qt = tempWs.QueryTables.Add(Connection:=conn, Destination:=tempWs.Range("A1"))
+            With qt
+                .BackgroundQuery = False
+                .RefreshOnFileOpen = False
+                .Refresh
+            End With
+            
+            ' Add headers if missing
+            If tempWs.Cells(1, 1).Value <> "MonthNum" Then
+                tempWs.Rows(1).Insert
+                tempWs.Cells(1, 1).Value = "MonthNum"
+                tempWs.Cells(1, 2).Value = "DayOfMonth"
+                tempWs.Cells(1, 3).Value = "NormalizedQtyPct"
+                tempWs.Cells(1, 4).Value = "WeekdayName"
+                tempWs.Cells(1, 5).Value = "DataPoints"
+            End If
+            
+            Application.ScreenUpdating = True
+            LoadDailySeasonalityFromPowerQuery = True
+            Exit Function
+        End If
+    Next conn
+    
+    Application.ScreenUpdating = True
+    LoadDailySeasonalityFromPowerQuery = False
+    Exit Function
+    
+ErrorHandler:
+    Application.ScreenUpdating = True
+    LoadDailySeasonalityFromPowerQuery = False
+End Function
 
 Sub GenerateDailyCharts()
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(DAILY_SHEET)
@@ -636,6 +941,11 @@ Sub ClearDailyData()
     ws.Range("E3").Value = 0
     ws.Range("G3").Value = 0
     ws.Range("I3").Value = 0
+    
+    ' Clear cached data
+    Set dailySeasonalityDict = Nothing
+    Set dailyPromoDict = Nothing
+    Set skuDataDict = Nothing
     
     Application.ScreenUpdating = True
     MsgBox "Data cleared!", vbInformation

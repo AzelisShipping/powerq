@@ -1,0 +1,147 @@
+let
+    // === AGGREGATE DAILY SEASONALITY ANALYSIS ===
+    // Generates daily distribution patterns at Market/Channel level
+    // Lightweight approach for applying to all SKUs
+    
+    Source = Sql.Databases("40.113.5.200"),
+    Reporting_Ford = Source{[Name="Reporting_Ford"]}[Data],
+    dbo_Items = Reporting_Ford{[Schema="dbo",Item="Items"]}[Data],
+    
+    // Step 1: Aggressive early filtering - last 12 months only
+    RecentDate = Date.AddDays(DateTime.Date(DateTime.LocalNow()), -365),
+    FilteredRecent = Table.SelectRows(dbo_Items, each 
+        [ReceivedDate] >= RecentDate and 
+        [ReceivedDate] <= DateTime.Date(DateTime.LocalNow()) and
+        [Quantity] > 0),
+    
+    // Step 2: Join with market parameters for early filtering
+    MarketJoined = Table.NestedJoin(FilteredRecent, {"ID_Market"}, 
+        MarketTable, {"ID_Market"}, "Market", JoinKind.Inner),
+    
+    MarketExpanded = Table.ExpandTableColumn(MarketJoined, "Market", 
+        {"Channel", "Market", "Brand"}),
+    
+    // Step 3: Apply market/channel/brand filters
+    TargetFiltered = Table.SelectRows(MarketExpanded, each 
+        [Market] = Market and 
+        [Channel] = Channel and 
+        [Brand] = Brand),
+    
+    // Step 4: Add date components
+    WithMonthNum = Table.AddColumn(TargetFiltered, "MonthNum", 
+        each Date.Month([ReceivedDate]), Int64.Type),
+    
+    WithDayOfMonth = Table.AddColumn(WithMonthNum, "DayOfMonth", 
+        each Date.Day([ReceivedDate]), Int64.Type),
+    
+    WithYearMonth = Table.AddColumn(WithDayOfMonth, "YearMonth", 
+        each Date.ToText([ReceivedDate], "yyyy-MM"), type text),
+    
+    // Step 5: Aggregate daily totals across ALL SKUs by month/day
+    DailyTotals = Table.Group(WithYearMonth, 
+        {"YearMonth", "MonthNum", "DayOfMonth"}, 
+        {{"TotalDailyQty", each List.Sum([Quantity]), type number}}),
+    
+    // Step 6: Calculate monthly totals
+    MonthlyTotals = Table.Group(DailyTotals, 
+        {"YearMonth", "MonthNum"}, 
+        {{"MonthlyQty", each List.Sum([TotalDailyQty]), type number}}),
+    
+    // Step 7: Join to calculate daily percentages
+    DailyWithMonthly = Table.NestedJoin(DailyTotals, 
+        {"YearMonth", "MonthNum"}, 
+        MonthlyTotals, 
+        {"YearMonth", "MonthNum"}, 
+        "Monthly", JoinKind.Inner),
+    
+    ExpandedMonthly = Table.ExpandTableColumn(DailyWithMonthly, 
+        "Monthly", {"MonthlyQty"}),
+    
+    // Step 8: Calculate daily distribution percentages
+    WithDailyPct = Table.AddColumn(ExpandedMonthly, "DailyQtyPct", 
+        each if [MonthlyQty] > 0 then [TotalDailyQty] / [MonthlyQty] else 0, 
+        type number),
+    
+    // Step 9: Average across all instances of each month/day combination
+    AvgDailyPatterns = Table.Group(WithDailyPct, 
+        {"MonthNum", "DayOfMonth"}, 
+        {{"AvgQtyPct", each List.Average([DailyQtyPct]), type number},
+         {"DataPoints", each Table.RowCount(_), Int64.Type}}),
+    
+    // Step 10: Create complete month/day grid
+    DaysInMonth = Table.FromList({1..31}, Splitter.SplitByNothing(), {"DayOfMonth"}),
+    MonthsList = Table.FromList({1..12}, Splitter.SplitByNothing(), {"MonthNum"}),
+    AllMonthDays = Table.AddColumn(
+        Table.ExpandTableColumn(
+            Table.AddColumn(MonthsList, "Days", each DaysInMonth), 
+            "Days", {"DayOfMonth"}
+        ), 
+        "IsValidDay", 
+        each 
+            if [MonthNum] = 2 and [DayOfMonth] > 29 then false
+            else if List.Contains({4,6,9,11}, [MonthNum]) and [DayOfMonth] > 30 then false
+            else true,
+        type logical
+    ),
+    ValidMonthDays = Table.SelectRows(AllMonthDays, each [IsValidDay] = true),
+    
+    // Step 11: Left join with actual patterns
+    WithPatterns = Table.NestedJoin(ValidMonthDays, 
+        {"MonthNum", "DayOfMonth"}, 
+        AvgDailyPatterns, 
+        {"MonthNum", "DayOfMonth"}, 
+        "Pattern", JoinKind.LeftOuter),
+    
+    ExpandedPatterns = Table.ExpandTableColumn(WithPatterns, "Pattern", 
+        {"AvgQtyPct", "DataPoints"}),
+    
+    // Step 12: Fill missing days with uniform distribution
+    FilledPatterns = Table.AddColumn(ExpandedPatterns, "QtyDistribution", 
+        each 
+            if [AvgQtyPct] <> null and [DataPoints] > 0 then [AvgQtyPct]
+            else if [MonthNum] = 2 then 1/29
+            else if List.Contains({4,6,9,11}, [MonthNum]) then 1/30
+            else 1/31,
+        type number),
+    
+    // Step 13: Normalize distributions to sum to 1 for each month
+    MonthlyNormalization = Table.Group(FilledPatterns, 
+        {"MonthNum"}, 
+        {{"TotalQtyPct", each List.Sum([QtyDistribution]), type number}}),
+    
+    WithNormalization = Table.NestedJoin(FilledPatterns, 
+        {"MonthNum"}, 
+        MonthlyNormalization, 
+        {"MonthNum"}, 
+        "Norm", JoinKind.Inner),
+    
+    ExpandedNorm = Table.ExpandTableColumn(WithNormalization, "Norm", 
+        {"TotalQtyPct"}),
+    
+    // Step 14: Final normalized percentages
+    NormalizedDistribution = Table.AddColumn(ExpandedNorm, "NormalizedQtyPct", 
+        each if [TotalQtyPct] > 0 then [QtyDistribution] / [TotalQtyPct] else [QtyDistribution],
+        type number),
+    
+    // Step 15: Add weekday information for analysis
+    WithWeekday = Table.AddColumn(NormalizedDistribution, "WeekdayName", 
+        each 
+            // Calculate a sample date for this month/day to get weekday
+            let 
+                sampleDate = #date(2024, [MonthNum], [DayOfMonth]),
+                weekdayNum = Date.DayOfWeek(sampleDate, Day.Monday),
+                weekdayName = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}{weekdayNum}
+            in weekdayName,
+        type text),
+    
+    // Step 16: Final output
+    FinalOutput = Table.SelectColumns(WithWeekday, 
+        {"MonthNum", "DayOfMonth", "NormalizedQtyPct", 
+         "WeekdayName", "DataPoints"}),
+    
+    // Step 17: Sort for readability
+    Sorted = Table.Sort(FinalOutput, 
+        {{"MonthNum", Order.Ascending}, 
+         {"DayOfMonth", Order.Ascending}})
+in
+    Sorted
