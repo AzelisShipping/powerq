@@ -678,7 +678,6 @@ End Function
 
 Private Function CalculatePromoLiftWithElasticity(promoType As String, promoValue As Double, _
     durationFactor As Double, cachedData As Variant) As Double
-    
     ' Get pre-calculated lift from PromoROI
     Dim baseLift As Double
     Select Case UCase(Trim(promoType))
@@ -692,20 +691,24 @@ Private Function CalculatePromoLiftWithElasticity(promoType As String, promoValu
         Case Else: baseLift = 0.15
     End Select
     
-    ' Apply discount depth adjustment
+    ' Apply discount depth adjustment with diminishing returns (log-based)
     Dim depthMultiplier As Double
+    Dim k As Double: k = 1.5 ' Calibration constant for diminishing returns
     If promoValue < 1 Then
-        ' Percentage discount: higher discount = higher lift
-        depthMultiplier = 1 + (promoValue * 1.5)  ' 20% off = 1.3x multiplier
+        ' Percentage discount: higher discount = higher lift, but with diminishing returns
+        If promoValue < 0 Then promoValue = 0
+        depthMultiplier = 1 + Log(1 + k * promoValue)
     Else
-        ' Absolute discount: use tiered multiplier
+        ' Absolute discount: convert to % of base price, cap at 100%
         Dim discountPct As Double
         If cachedData(IDX_BASE_PRICE) > 0 Then
             discountPct = promoValue / cachedData(IDX_BASE_PRICE)
         Else
             discountPct = 0.1  ' Default 10%
         End If
-        depthMultiplier = 1 + (discountPct * 1.5)
+        If discountPct > 1 Then discountPct = 1
+        If discountPct < 0 Then discountPct = 0
+        depthMultiplier = 1 + Log(1 + k * discountPct)
     End If
     
     ' Final calculation with cap

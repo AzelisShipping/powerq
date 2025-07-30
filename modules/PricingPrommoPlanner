@@ -776,7 +776,7 @@ Private Function CalculateOptimalSuggestedPrice(rrp As Double, minPrice As Doubl
                                               maxDiscountPct As Double, sku As String, abcQtyData As Variant, _
                                               baseQty As Double, elasticity As Double) As Variant
     ' Returns array: [price, quality, reasoning]
-    ' SIMPLIFIED: Focus on elasticity to maximize revenue & quantity
+    ' UPDATED: Maximize revenue; fallback simulates discounts if elasticity missing
     
     Dim result As Variant: result = Array(0, "", "")
     Dim suggestedPrice As Double
@@ -796,39 +796,39 @@ Private Function CalculateOptimalSuggestedPrice(rrp As Double, minPrice As Doubl
     
     ' Calculate optimal price based on elasticity
     If elasticity > 0 And elasticity <= 10 And baseQty > 0 Then
-        ' Optimal discount formula: maximize (1 - discount) * (1 + elasticity * discount)
-        ' This maximizes revenue considering volume increase
-        Dim optimalDiscountPct As Double
-        
-        If elasticity > 3 Then
-            ' High elasticity: deeper discounts drive more volume
-            optimalDiscountPct = 0.15 + (elasticity - 3) * 0.02
-            reasoning = "High elasticity (" & Format(elasticity, "0.0") & ") - volume focused"
-        ElseIf elasticity > 2 Then
-            ' Moderate elasticity
-            optimalDiscountPct = 0.1 + (elasticity - 2) * 0.05
-            reasoning = "Moderate elasticity (" & Format(elasticity, "0.0") & ") - balanced"
-        ElseIf elasticity > 1 Then
-            ' Low elasticity
-            optimalDiscountPct = 0.05 + (elasticity - 1) * 0.05
-            reasoning = "Low elasticity (" & Format(elasticity, "0.0") & ") - margin focused"
-        Else
-            ' Very low elasticity: maintain price
-            optimalDiscountPct = 0
-            reasoning = "Very low elasticity (" & Format(elasticity, "0.0") & ") - RRP maintained"
-        End If
-        
-        ' Cap at max allowed discount
-        If optimalDiscountPct > maxDiscountPct Then
-            optimalDiscountPct = maxDiscountPct
-            reasoning = reasoning & " (capped at max discount)"
-        End If
-        
-        suggestedPrice = rrp * (1 - optimalDiscountPct)
+        ' Maximize revenue: (1 - d) * (1 + elasticity * d)
+        Dim bestRev As Double: bestRev = 0
+        Dim bestDiscount As Double: bestDiscount = 0
+        Dim d As Double
+        For d = 0 To maxDiscountPct Step 0.01
+            Dim price As Double: price = rrp * (1 - d)
+            Dim volumeFactor As Double: volumeFactor = 1 + elasticity * d
+            Dim estRevenue As Double: estRevenue = baseQty * price * volumeFactor
+            If estRevenue > bestRev Then
+                bestRev = estRevenue
+                bestDiscount = d
+            End If
+        Next d
+        suggestedPrice = rrp * (1 - bestDiscount)
+        reasoning = "Elasticity-driven revenue maximization (best discount: " & Format(bestDiscount, "0.0%") & ")"
     Else
-        ' No elasticity data - maintain RRP
-        suggestedPrice = rrp
-        reasoning = "No elasticity data - RRP maintained"
+        ' No elasticity data – simulate revenue at 0%, 10%, 20%, 30% discounts
+        Dim defaultE As Double: defaultE = 1.5
+        Dim bestRev As Double: bestRev = 0
+        Dim bestPrice As Double: bestPrice = rrp
+        Dim testDiscount As Variant
+        For Each testDiscount In Array(0, 0.1, 0.2, 0.3)
+            If testDiscount > maxDiscountPct Then Exit For
+            Dim testPrice As Double: testPrice = rrp * (1 - testDiscount)
+            Dim volumeFactor As Double: volumeFactor = 1 + defaultE * testDiscount
+            Dim estRevenue As Double: estRevenue = baseQty * testPrice * volumeFactor
+            If estRevenue > bestRev Then
+                bestRev = estRevenue
+                bestPrice = testPrice
+            End If
+        Next testDiscount
+        suggestedPrice = bestPrice
+        reasoning = "No elasticity data – tested discounts for max revenue"
     End If
     
     ' Apply constraints
